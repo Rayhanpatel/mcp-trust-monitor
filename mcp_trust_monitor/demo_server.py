@@ -130,6 +130,7 @@ def server_config(server_id: str, state_dir: Path, fixture_path: Path) -> Server
             "--fixture", str(Path(fixture_path).resolve()),
         ),
         env={"PYTHONPATH": str(REPO_ROOT)},
+        origin="synthetic_fixture",
     )
 
 

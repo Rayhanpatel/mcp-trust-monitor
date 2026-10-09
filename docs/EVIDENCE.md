@@ -45,4 +45,11 @@ Run on 9 October 2026 during M0. Semgrep and ClickHouse were exercised against t
 | Senso | Authenticated (user-reported); retrieval pending | The user reports an independent authentication check succeeded for organization "MCP Trust Monitor". `SENSO_API_KEY` is now set in `.env`, checked by name only. This repository has not contacted Senso. Policy upload and scoped retrieval (REQ-SRC-01) are not done, and `SENSO_POLICY_CONTENT_IDS` is empty. |
 | Model API (OpenAI) | Request succeeded (user-reported); not integrated | The user reports an independent Responses API request using `gpt-6-astra` succeeded. `OPENAI_API_KEY` is now set in `.env`, checked by name only. This repository makes no model calls and has no OpenAI dependency until M3. |
 
+### Application use (M2, 9 October 2026, 15:17 PDT)
+
+- **Semgrep.** `demo-m2` ran the repository's hard-deny rules with Semgrep 1.180.0, verified by `--version` and pinned in an isolated `uvx` environment, on the mutated synthetic tool description. It reported POL-001 and POL-002 with exact evidence spans (`description[61:150]` and `[214:251]`).
+- **Fixed cases.** All six fixed evaluation cases produce exactly their `expected_hard_deny_policy_ids` under real Semgrep (`tests/test_detector.py`).
+- **ClickHouse.** The same run delivered 17 outbox events for run `demo-m2-cc76dd40-…` to `mcp_trust_monitor.trust_history` in 897 ms. It then resent 3 of them with the same event IDs and read back 20 raw rows, but 17 distinct event IDs, in 525 ms.
+- All data in this run was `synthetic_fixture`.
+
 Blocked integrations do not block the local enforcement milestone (M1). Rerun each check against the actual service before claiming it.

@@ -18,24 +18,31 @@ this managed client authorizes against the same persisted record, they all block
 until valid metadata is observed and an operator approves again.
 
 `observe` is metadata-only (initialize and paginated tools/list). It records the
-server revision, which may invalidate an approval, and never dispatches a tool.
+server revision with its provenance (REQ-REV-03), which may invalidate an approval,
+and never dispatches a tool.
+
+`apply_hard_deny` applies a deterministic detector match under the same per-server
+lock, only if the assessed revision, generation, and policy are still current, and
+closes the connection when it quarantines (REQ-DEC-01, REQ-ENF-03).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import mcp.types as types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from .revision import server_revision, tool_metadata
-from .trust_store import TrustRecord, TrustState, TrustStore
+from .trust_store import HardDenyOutcome, TrustRecord, TrustState, TrustStore
 
 MAX_TOOL_LIST_PAGES = 20
 
@@ -48,6 +55,14 @@ class ServerConfig:
     # None passes only the MCP SDK's minimal default environment to the server.
     env: Mapping[str, str] | None = None
     cwd: str | None = None
+    # `live` or `synthetic_fixture`; recorded with every observation (REQ-REV-03).
+    origin: str = "live"
+
+    @property
+    def endpoint(self) -> str:
+        """Endpoint identity without arguments, which could carry credentials."""
+        command_line = "\0".join((self.command, *self.args)).encode("utf-8")
+        return f"stdio:{self.server_id}#cmd-sha256:{hashlib.sha256(command_line).hexdigest()[:16]}"
 
 
 class CallBlocked(Exception):
@@ -69,6 +84,10 @@ class _Connection:
     config: ServerConfig
     timeout: timedelta
     session: ClientSession | None = None
+    # From the MCP initialize result; recorded as observation provenance (REQ-REV-03).
+    server_name: str | None = None
+    server_version: str | None = None
+    protocol_version: str | None = None
     # Revision recorded by this session's last successful observation; None until then.
     validated_revision: str | None = None
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -107,7 +126,10 @@ class _Connection:
         try:
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write, read_timeout_seconds=self.timeout) as session:
-                    await session.initialize()
+                    initialized = await session.initialize()
+                    self.server_name = initialized.serverInfo.name
+                    self.server_version = initialized.serverInfo.version
+                    self.protocol_version = str(initialized.protocolVersion)
                     self.session = session
                     self._ready.set()
                     await self._stop.wait()
@@ -171,6 +193,28 @@ class ManagedClient:
             record = self.store.quarantine(server_id, actor=actor, reason=reason)
             await self._disconnect(server_id)
             return record
+
+    async def apply_hard_deny(
+        self,
+        server_id: str,
+        *,
+        revision: str,
+        generation: int,
+        policy_context: str,
+        active_policy_context: Callable[[], str],
+        detection: Mapping[str, Any],
+    ) -> HardDenyOutcome:
+        """Apply under the per-server lock. `active_policy_context` is evaluated here, at
+        apply time, so a policy or rules change since the scan makes the result stale."""
+        async with self._lock(server_id):
+            outcome = self.store.apply_hard_deny(
+                server_id, revision=revision, generation=generation,
+                policy_revision=policy_context, active_policy_revision=active_policy_context(),
+                detection=detection,
+            )
+            if outcome.status in ("applied", "already_quarantined"):
+                await self._disconnect(server_id)
+            return outcome
 
     async def call_tool(
         self, server_id: str, tool: str, arguments: dict[str, Any] | None = None
@@ -272,12 +316,21 @@ class ManagedClient:
     async def _observe(self, server_id: str, connection: _Connection) -> TrustRecord:
         connection.validated_revision = None
         try:
-            tools = await self._list_tools(server_id, connection)
+            tools, raw_tools = await self._list_tools(server_id, connection)
             try:
                 revision = server_revision(tools)
             except ValueError as exc:
                 raise ObservationError(f"invalid tools/list from {server_id}: {exc}") from exc
-            record = self.store.record_observation(server_id, revision, tools)
+            config = self.servers[server_id]
+            record = self.store.record_observation(
+                server_id, revision, tools,
+                provenance={"endpoint": config.endpoint, "transport": "stdio",
+                            "server_name": connection.server_name,
+                            "server_version": connection.server_version,
+                            "protocol_version": connection.protocol_version,
+                            "raw_tools_json": json.dumps(raw_tools, sort_keys=True),
+                            "origin": config.origin},
+            )
         except Exception as exc:
             # A failed or incomplete observation never leaves a session eligible.
             self._record_observation_failure(server_id, exc)
@@ -291,10 +344,14 @@ class ManagedClient:
         self.store.record_observation_failure(server_id, actor="managed-client",
                                               error=f"{type(exc).__name__}: {exc}")
 
-    async def _list_tools(self, server_id: str, connection: _Connection) -> list[dict[str, Any]]:
+    async def _list_tools(
+        self, server_id: str, connection: _Connection
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Reviewed fields per tool, and the complete JSON-serializable tool as received."""
         if connection.session is None:
             raise ObservationError(f"session for {server_id} is closed")
         tools: list[dict[str, Any]] = []
+        raw_tools: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(MAX_TOOL_LIST_PAGES):
             params = types.PaginatedRequestParams(cursor=cursor) if cursor else None
@@ -302,10 +359,12 @@ class ManagedClient:
                 page = await connection.session.list_tools(params=params)
             except Exception as exc:
                 raise ObservationError(f"tools/list failed for {server_id}: {exc!r}") from exc
-            tools.extend(tool_metadata(tool.model_dump(by_alias=True)) for tool in page.tools)
+            for tool in page.tools:
+                tools.append(tool_metadata(tool.model_dump(by_alias=True)))
+                raw_tools.append(tool.model_dump(mode="json", by_alias=True, exclude_none=True))
             cursor = page.nextCursor
             if not cursor:
-                return tools
+                return tools, raw_tools
         raise ObservationError(f"tools/list for {server_id} exceeded {MAX_TOOL_LIST_PAGES} pages")
 
     async def _disconnect(self, server_id: str) -> None:

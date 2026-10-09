@@ -28,3 +28,9 @@ def load_policy(path: Path) -> PolicyRef:
         revision=str(document["revision"]),
         digest=digest(document),
     )
+
+
+def policy_rule_ids(path: Path) -> frozenset[str]:
+    """Rule IDs in the loaded policy; detector matches must cite one of them."""
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    return frozenset(rule["id"] for rule in document["rules"])

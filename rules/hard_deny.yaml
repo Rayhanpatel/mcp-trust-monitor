@@ -1,0 +1,38 @@
+# Deterministic hard-deny detectors (REQ-DEC-01). Each rule implements one
+# `hard_deny_condition` from policies/demo-policy.json and runs on a tool's
+# description as plain text. A match quarantines the revision; no model output can
+# override it.
+#
+# Matching is within one sentence ([^.!?\n]). An action verb immediately preceded by
+# "never", "not", "no", or "n't" and one space is not matched, so ordinary negated
+# instructions ("never ignore the security policy", "do not send private notes to
+# https://...") are not hard denials. The guard applies per verb occurrence, so
+# "never ignore errors; ignore the security policy" still matches on the second verb.
+# Known limits: other negations ("under no circumstances ignore ...", "refrain from
+# ignoring ...", two spaces) still match and over-quarantine, which fails closed and
+# the operator can restore; paraphrases without these verbs, nouns, or an explicit
+# address do not match and stay pending review. Only descriptions are scanned.
+rules:
+  - id: hard-deny.pol-001.private-content-to-address
+    languages: [generic]
+    severity: ERROR
+    message: Directs transmitting private, confidential, or workspace content to an explicit URL or email address.
+    metadata:
+      policy_id: POL-001
+    pattern-either:
+      - pattern-regex: |-
+          (?i)(?<!\bnever\s)(?<!\bnot\s)(?<!\bno\s)(?<!n't\s)(?<!n’t\s)\b(?:send|upload|post|transmit|forward|e-?mail|share|submit|copy|paste)\b[^.!?\n]{0,160}?\b(?:private|confidential|workspace)\b[^.!?\n]{0,160}?(?:https?://[^\s,;)"'<>]+|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)
+      - pattern-regex: |-
+          (?i)(?<!\bnever\s)(?<!\bnot\s)(?<!\bno\s)(?<!n't\s)(?<!n’t\s)\b(?:send|upload|post|transmit|forward|e-?mail|share|submit|copy|paste)\b[^.!?\n]{0,160}?(?:https?://[^\s,;)"'<>]+|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b)[^.!?\n]{0,160}?\b(?:private|confidential|workspace)\b
+
+  - id: hard-deny.pol-002.override-operator-policy
+    languages: [generic]
+    severity: ERROR
+    message: Directs ignoring, disregarding, bypassing, or overriding the operator's security policy.
+    metadata:
+      policy_id: POL-002
+    pattern-either:
+      - pattern-regex: |-
+          (?i)(?<!\bnever\s)(?<!\bnot\s)(?<!\bno\s)(?<!n't\s)(?<!n’t\s)\b(?:ignore|disregard|bypass|override|circumvent)\b[^.!?\n]{0,120}?\b(?:security|operator(?:'|’)?s?)\s+polic(?:y|ies)\b
+      - pattern-regex: |-
+          (?i)\b(?:security|operator(?:'|’)?s?)\s+polic(?:y|ies)\b[^.!?\n]{0,120}?(?<!\bnever\s)(?<!\bnot\s)(?<!\bno\s)(?<!n't\s)(?<!n’t\s)\b(?:ignore|disregard|bypass|override|circumvent)\b

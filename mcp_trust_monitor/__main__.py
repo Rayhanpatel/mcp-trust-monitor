@@ -11,21 +11,27 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from . import demo_server as demo
+from . import history
+from .detector import DetectorError, verify_semgrep
 from .managed_client import CallBlocked, ManagedClient, trust_db_path
 from .policy import load_policy
+from .review import review_server, verify_blocked
 from .trust_store import StaleDecisionError, TrustError, TrustStore
 
 DEFAULT_STATE_DIR = demo.REPO_ROOT / "runtime" / "state"
 DEFAULT_POLICY = demo.REPO_ROOT / "policies" / "demo-policy.json"
 
 
-def _client(args: argparse.Namespace, state_dir: Path | None = None) -> ManagedClient:
+def _client(args: argparse.Namespace, state_dir: Path | None = None,
+            run_id: str | None = None) -> ManagedClient:
     state_dir = state_dir or args.state_dir
-    store = TrustStore(trust_db_path(state_dir), client_id=args.client_id)
+    store = TrustStore(trust_db_path(state_dir), client_id=args.client_id, run_id=run_id)
     servers = {sid: demo.server_config(sid, state_dir, args.fixture) for sid in demo.DEMO_SERVERS}
     return ManagedClient(store, servers, policy_revision=load_policy(args.policy).binding)
 
@@ -168,6 +174,185 @@ async def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_detection(detection: dict | None) -> None:
+    for match in (detection or {}).get("matches", []):
+        print(f"    {match['policy_id']} {match['rule_id']}  {match['tool']}.{match['field']}"
+              f"[{match['start']}:{match['end']}]")
+        print(f"      evidence: {match['text']!r}")
+
+
+async def cmd_review(args: argparse.Namespace) -> int:
+    """One hard-deny review pass on persisted state; never approves."""
+    async with _client(args) as client:
+        report = await review_server(client, args.server, policy_path=args.policy)
+    print(f"{args.server}: {report.outcome} after {report.attempts} attempt(s)"
+          f"  revision {report.revision}")
+    _print_detection(report.detection)
+    if report.error:
+        print(f"    detector error: {report.error}")
+    return 0 if report.outcome in ("quarantined", "pending_review", "skipped") else 1
+
+
+def _deliver(store: TrustStore, settings: dict[str, str]) -> history.DeliveryResult:
+    secrets = history.secrets_of(settings)
+    try:
+        client = history.ClickHouseHTTP(settings)
+    except ValueError as exc:
+        return history.DeliveryResult(0, store.outbox_status()["pending"],
+                                      history.sanitize(str(exc), secrets))
+    return history.deliver_pending(store, client, settings["CLICKHOUSE_DATABASE"],
+                                   secrets=secrets)
+
+
+async def cmd_deliver(args: argparse.Namespace) -> int:
+    """Deliver pending outbox events to ClickHouse. Exit 0 only if none remain pending."""
+    store = TrustStore(trust_db_path(args.state_dir), client_id=args.client_id)
+    try:
+        settings = history.load_settings()
+    except history.SettingsMissing as missing:
+        print(f"not delivered: {missing}; {store.outbox_status()['pending']} event(s) stay pending")
+        return 2
+    result = _deliver(store, settings)
+    print(f"delivered {result.delivered}; pending {result.pending}")
+    if result.error:
+        print(f"delivery error (sanitized): {result.error}")
+    return 0 if result.ok else 1
+
+
+async def cmd_demo_m2(args: argparse.Namespace) -> int:
+    """M2 run: real Semgrep hard-deny -> automatic quarantine -> verified block -> ClickHouse."""
+    state_dir = Path(tempfile.mkdtemp(prefix="mcp-trust-demo-m2-"))
+    run_id = f"demo-m2-{uuid.uuid4()}"
+    lookup, control = demo.MUTABLE_SERVER, demo.CONTROL_SERVER
+    fixture = demo.load_fixture(args.fixture)
+    lookup_args = {"title": "Annual report"}
+    failures: list[str] = []
+
+    def received(server_id: str) -> int:
+        return len(demo.received_requests(state_dir, server_id))
+
+    async def call(client: ManagedClient, server_id: str, tool: str, arguments: dict) -> bool:
+        try:
+            result = await client.call_tool(server_id, tool, arguments)
+            print(f"    call {server_id}/{tool}: ok {_result_text(result)}")
+            ok = not result.isError
+        except CallBlocked as blocked:
+            print(f"    call {server_id}/{tool}: BLOCKED before dispatch ({blocked.reason})")
+            ok = False
+        print(f"    server-side received tools/call count for {server_id}: {received(server_id)}")
+        return ok
+
+    print(f"run id: {run_id}")
+    print(f"state directory: {state_dir}  (all data synthetic_fixture)")
+    try:
+        print(f"[0] pinned Semgrep executable verified: {verify_semgrep()}")
+    except DetectorError as exc:
+        print(f"[0] Semgrep verification FAILED: {exc}")
+        return 1
+
+    async with _client(args, state_dir, run_id) as client:
+        print("[1] operator explicitly approves both baselines; normal calls succeed")
+        for server_id in (lookup, control):
+            record = await client.observe(server_id)
+            await client.approve(server_id, revision=record.observed_revision,
+                                 expected_generation=record.generation, actor="operator-demo")
+        if not await call(client, lookup, "lookup_document", lookup_args):
+            failures.append("baseline lookup")
+        if not await call(client, control, "health_check", {}):
+            failures.append("baseline control")
+
+        print("[2] the mutable server changes its description (scenario private-content-demand)")
+        tool = demo.scenario_definition(fixture, "private-content-demand")
+        demo.write_definition(state_dir, tool)
+        print(f"    new description: {tool['description']!r}")
+        changed = await client.observe(lookup)
+        started = time.perf_counter()
+        print(f"    {lookup}: {changed.state.value} (approval invalidated) "
+              f"{changed.observed_revision[:19]} generation {changed.generation}")
+        await call(client, lookup, "lookup_document", lookup_args)
+
+        print("[3] hard-deny review with real Semgrep; no human decision")
+        report = await review_server(client, lookup, policy_path=args.policy)
+        _print_detection(report.detection)
+        state = client.store.get(lookup).state.value
+        print(f"    outcome: {report.outcome}; trust state: {state}; attempts {report.attempts}")
+        if report.outcome != "quarantined":
+            failures.append(f"review outcome {report.outcome}")
+
+        print("[4] verify through the normal call path; the control is unaffected")
+        if report.quarantine is None:
+            print("    no applied quarantine to verify")
+            store = client.store
+            print(f"FAILED: {', '.join(failures)}")
+            return 1
+        verification = await verify_blocked(client, lookup, "lookup_document", lookup_args,
+                                            lambda: received(lookup),
+                                            quarantine=report.quarantine)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        print(f"    call {lookup}/lookup_document: BLOCKED before dispatch "
+              f"({verification['blocked_reason']})" if verification["blocked_reason"]
+              else f"    call {lookup}/lookup_document was NOT blocked")
+        print(f"    server-side received count before {verification['received_before']}, "
+              f"after {verification['received_after']}: "
+              f"{'verified_blocked' if verification['verified'] else 'VERIFICATION FAILED'}")
+        if not verification["verified"]:
+            failures.append("verification: " + "; ".join(verification["problems"]))
+        if not await call(client, control, "health_check", {}):
+            failures.append("control after quarantine")
+        print(f"    measured: observed change -> verified block in {elapsed_ms:.0f} ms "
+              "(includes one Semgrep run)")
+        store = client.store
+
+    print("[5] deliver this run's outbox to ClickHouse and read it back")
+    local = store.outbox_status()
+    try:
+        settings = history.load_settings()
+    except history.SettingsMissing as missing:
+        print(f"    NOT DELIVERED: {missing}; {local['pending']} event(s) stay pending locally")
+        return 2
+    started = time.perf_counter()
+    result = _deliver(store, settings)
+    print(f"    delivered {result.delivered}, pending {result.pending} "
+          f"in {(time.perf_counter() - started) * 1000:.0f} ms")
+    if not result.ok:
+        print(f"    delivery error (sanitized): {result.error}")
+        print(f"    events stay pending in {trust_db_path(state_dir)}; retry with: "
+              f"python -m mcp_trust_monitor --state-dir {state_dir} deliver")
+        return 1
+    secrets = history.secrets_of(settings)
+    database = settings["CLICKHOUSE_DATABASE"]
+    clickhouse = history.ClickHouseHTTP(settings)
+    try:
+        # Simulate a retry after a lost acknowledgement: resend already-delivered events.
+        resent = store.delivered_payloads(limit=3)
+        clickhouse.execute(f"INSERT INTO `{database}`.{history.TABLE} FORMAT JSONEachRow",
+                           body="\n".join(json.dumps(row, sort_keys=True) for row in resent))
+        print(f"    re-sent {len(resent)} delivered event(s) with the same IDs "
+              "(simulated retry after a lost acknowledgement)")
+        started = time.perf_counter()
+        read = history.read_history(clickhouse, database, run_id)
+        read_ms = (time.perf_counter() - started) * 1000
+    except Exception as exc:
+        print(f"    read-back FAILED (sanitized): "
+              f"{history.sanitize(f'{type(exc).__name__}: {exc}', secrets)[:300]}")
+        return 1
+    expected = store.outbox_status()["delivered"]
+    print(f"    ClickHouse rows for this run: {read['raw_rows']} raw, {read['events']} distinct "
+          f"event IDs; local delivered events: {expected}; read in {read_ms:.0f} ms")
+    if read["events"] != expected or len(read["timeline"]) != expected:
+        failures.append("ClickHouse read-back mismatch")
+    for row in read["timeline"]:
+        if row["event_type"] == "observation_recorded":
+            continue
+        print(f"    {row['ts']}  {row['server_id']:22} {row['event_type']:22} "
+              f"-> {row['to_state'] or '-'}")
+    if failures:
+        print(f"FAILED: {', '.join(failures)}")
+        return 1
+    print("M2 demo complete: all checks matched")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m mcp_trust_monitor", description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
@@ -210,7 +395,15 @@ def build_parser() -> argparse.ArgumentParser:
     target.add_argument("--baseline", action="store_true", help="serve the fixture baseline")
     mutate.set_defaults(run=cmd_mutate)
 
+    review = commands.add_parser("review", help="hard-deny review of one server (never approves)")
+    review.add_argument("server", choices=demo.DEMO_SERVERS)
+    review.set_defaults(run=cmd_review)
+
+    commands.add_parser("deliver", help="deliver pending history events to ClickHouse"
+                        ).set_defaults(run=cmd_deliver)
     commands.add_parser("demo", help="run the scripted M1 walkthrough").set_defaults(run=cmd_demo)
+    commands.add_parser("demo-m2", help="run the M2 hard-deny walkthrough and ClickHouse read-back"
+                        ).set_defaults(run=cmd_demo_m2)
     return parser
 
 

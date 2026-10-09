@@ -2,7 +2,14 @@
 
 An agent that monitors changes to MCP tool definitions, evaluates them against an explicit policy, and quarantines affected connections in a managed client with evidence for each decision.
 
-**Status: milestone M1, the enforcement boundary.** A managed MCP client binds trust to exact metadata revisions and refuses calls before transport dispatch unless the current revision is explicitly approved. Two controlled local MCP servers exercise it over real stdio transport. Observation history (ClickHouse), hard-deny detection (Semgrep), scoped policy retrieval (Senso), model review, and the timeline view are not implemented yet; see [the handoff](docs/HANDOFF.md).
+**Status: milestone M2, observation history and hard-deny detection.** A managed MCP client binds trust to exact metadata revisions and refuses calls before transport dispatch unless the current revision is explicitly approved. Two controlled local MCP servers exercise it over real stdio transport.
+
+M2 adds:
+- an observation history with provenance;
+- deterministic hard-deny detection on tool *descriptions* with pinned Semgrep, which quarantines a still-current revision automatically;
+- a local outbox delivered to ClickHouse and read back with event-ID deduplication.
+
+Scoped policy retrieval (Senso), model review (OpenAI), polling, and the timeline view are not implemented yet; see [the handoff](docs/HANDOFF.md).
 
 ## The product
 
@@ -34,6 +41,14 @@ Scripted walkthrough of the enforcement boundary in a fresh temporary state dire
 ```sh
 uv run python -m mcp_trust_monitor demo
 ```
+
+M2 walkthrough: real Semgrep detects a hard-deny condition, the current revision is quarantined, the next call is verified blocked with the server-side count unchanged, the control still works, and the run's events are delivered to ClickHouse and read back with deduplication. It needs `uv` (Semgrep 1.180.0 runs in an isolated `uvx` environment; set `MCP_TRUST_SEMGREP` to override the command) and the ClickHouse values in `.env`:
+
+```sh
+uv run python -m mcp_trust_monitor demo-m2
+```
+
+Manual M2 steps: `review <server>` runs one hard-deny review and never approves, and `deliver` sends pending history events to ClickHouse; it exits nonzero while any remain pending.
 
 Manual operation. State persists in `runtime/state/` (ignored by Git):
 
@@ -76,6 +91,10 @@ uv run python scripts/smoke_clickhouse.py
 | `mcp_trust_monitor/__main__.py` | Command line and scripted demo |
 | `tests/` | Focused behavior tests |
 | `scripts/smoke_clickhouse.py` | ClickHouse Cloud connectivity and permission smoke test |
+| `rules/hard_deny.yaml` | Semgrep rules implementing the policy's hard-deny conditions on tool descriptions |
+| `mcp_trust_monitor/detector.py` | Pinned, isolated Semgrep runner returning policy IDs and exact evidence spans |
+| `mcp_trust_monitor/review.py` | Hard-deny review pass (apply only if current) and evidence-based block verification |
+| `mcp_trust_monitor/history.py` | Bounded ClickHouse delivery of the local outbox and deduplicated reads |
 | `fixtures/tool_changes.json` | Synthetic baseline, control, and fixed evaluation cases |
 | `policies/demo-policy.json` | Operator-authored policy with hard-deny conditions and decision authority |
 | `tools/registry_probe_prototype.py` | Inherited metadata-discovery experiment; not a hardened collector |
@@ -86,9 +105,11 @@ The saved research snapshot contains 35 server records and 287 tool definitions.
 
 ## Stack
 
-Python with the official MCP SDK for the managed client and demo servers, and SQLite for local trust state. Planned:
-- ClickHouse for observation and decision history.
-- Local Semgrep for hard-deny detection.
+Python with the official MCP SDK for the managed client and demo servers, and SQLite for local trust state and the history outbox. Implemented in M2:
+- ClickHouse Cloud for observation and decision history, delivered from the local outbox.
+- Local Semgrep 1.180.0, pinned and run in an isolated `uvx` environment, for hard-deny detection on tool descriptions.
+
+Planned:
 - Senso for scoped policy retrieval.
 - OpenAI `gpt-6-astra` for bounded recommendations, called through the official OpenAI Python SDK and the Responses API with strict Structured Outputs. The model can recommend review or quarantine, never approval.
 

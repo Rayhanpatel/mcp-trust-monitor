@@ -121,7 +121,7 @@ Trust is scoped to `(managed client, server identity, server revision, policy re
 - **REQ-TRU-06 Idempotent decisions.** A duplicate decision does not repeat side effects.
 - **REQ-TRU-07 Observation freshness.** When polling is enabled, an observation older than two configured poll intervals blocks new calls until refreshed. A disconnected server keeps its trust record and is shown as stale, never as a successful scan.
 
-Operator quarantine is server-scoped and fail-closed: it applies regardless of revision. An assessment-driven decision whose revision or generation no longer matches is recorded as stale and discarded; the server stays blocked in pending review until a current decision exists.
+Operator quarantine is server-scoped and fail-closed: it applies regardless of revision. An assessment-driven decision whose revision or generation no longer matches is recorded as stale and discarded; the server stays blocked in pending review until a current decision exists. An assessment is current only while the revision, the generation, and the policy context all still match; the policy context is the policy binding plus the digest of the hard-deny rules that were scanned. A stale result is recorded as `assessment_stale` and is never applied. A current assessment must be obtained separately.
 
 Quarantine operates in the managed client's dispatch path. Editing an external `mcp.json` is outside the MVP.
 
@@ -136,7 +136,7 @@ Quarantine operates in the managed client's dispatch path. Editing an external `
 
 The applied outcome is the most restrictive of the deterministic result and the validated model recommendation. Restrictive outcomes are applied automatically. Authorizing outcomes require the operator.
 
-- **REQ-DEC-01 Hard-deny precedence.** Each policy rule may define a `hard_deny_condition` implemented by a deterministic detector (Semgrep). A match quarantines the observed revision. No model output can downgrade or override it.
+- **REQ-DEC-01 Hard-deny precedence.** Each policy rule may define a `hard_deny_condition` implemented by a deterministic detector (Semgrep). A match quarantines the observed revision. No model output can downgrade or override it. M2 scans tool descriptions only and records `scanned_fields`, so a clean result means "no hard-deny match in descriptions", not that the metadata or the tool's behavior was assessed.
 - **REQ-DEC-02 Bounded model role.** The model may recommend `review` or `quarantine` for one exact revision. It cannot approve. A validated quarantine recommendation is applied automatically; a review recommendation leaves the server pending review.
 - **REQ-DEC-03 Validation is traceability.** The validator rejects invented policy IDs, mismatched revisions or generations, missing source references, and evidence spans that do not match the observed metadata exactly. A rejected assessment is treated as review. Passing validation and citing sources establish traceability, not semantic correctness.
 - **REQ-DEC-04 Failure is never clean.** Retrieval failure, scan failure, model timeout, or malformed output leaves the revision pending review. The absence of a rule match never approves a change; every changed revision in the managed set receives an assessment.
@@ -163,7 +163,7 @@ No OpenAI dependency or integration code exists before M3.
 ### History and delivery failures
 
 - **REQ-AUD-01 Local commit with outbox.** Commit each trust transition and its audit event in one local transaction. Deliver events to ClickHouse with retries. An analytics outage cannot erase or delay a quarantine. Show pending delivery instead of pretending storage succeeded.
-- **REQ-AUD-02 Distinct outcomes.** Records distinguish `quarantine_requested`, `quarantine_applied`, and `verified_blocked`. Do not mark an outcome complete without its evidence.
+- **REQ-AUD-02 Distinct outcomes.** Records distinguish `quarantine_requested`, `quarantine_applied`, and `verified_blocked`. Do not mark an outcome complete without its evidence. `verified_blocked` requires a call refused before dispatch with reason `quarantined`, the record still quarantined at the applied generation, no client transport write, and an existing server-side received-call count that did not change. Anything else is `verification_failed`.
 
 Use append-only ClickHouse records for observations, assessments, actions, and verification events. Each carries an event ID, run ID, timestamp, origin, and relevant observation, revision, policy, and decision references. Deduplicate by event ID when reading; do not assume MergeTree enforces uniqueness. Use ordinary queries first; materialized views are unnecessary for this dataset.
 
