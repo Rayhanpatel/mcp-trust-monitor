@@ -4,8 +4,14 @@
 persisted trust record immediately before writing the request to the MCP
 transport (REQ-ENF-01) and refuses unless that exact revision is approved under the
 active policy (REQ-ENF-02). It checks once before connecting, so a blocked call
-never launches or contacts the server, and again after a new connection has
-recorded its observation.
+never launches or contacts the server, and again immediately before dispatch.
+
+A session is eligible for dispatch only while its own most recent observation
+succeeded and recorded the revision the store currently holds. A failed or
+incomplete observation clears that eligibility, records `observation_failed`, and
+closes the session (REQ-REV-02). A session validated at an older revision is
+re-observed before dispatch, so a persisted approval cannot stand in for current
+metadata.
 
 `observe` is metadata-only (initialize and paginated tools/list). It records the
 server revision, which may invalidate an approval, and never dispatches a tool.
@@ -59,6 +65,8 @@ class _Connection:
     config: ServerConfig
     timeout: timedelta
     session: ClientSession | None = None
+    # Revision recorded by this session's last successful observation; None until then.
+    validated_revision: str | None = None
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _task: asyncio.Task[None] | None = None
@@ -139,7 +147,7 @@ class ManagedClient:
 
     async def observe(self, server_id: str) -> TrustRecord:
         async with self._lock(server_id):
-            connection = await self._connection(server_id, observe_new=False)
+            connection = await self._open_connection(server_id)
             return await self._observe(server_id, connection)
 
     async def approve(
@@ -166,8 +174,8 @@ class ManagedClient:
         async with self._lock(server_id):
             try:
                 self._authorize(server_id, tool)
-                connection = await self._connection(server_id, observe_new=True)
-                record = self._authorize(server_id, tool)
+                connection = await self._validated_connection(server_id)
+                record = self._authorize(server_id, tool, connection)
             except CallBlocked as blocked:
                 if blocked.reason == TrustState.QUARANTINED.value:
                     # Quarantined elsewhere, such as by the CLI: drop this client's session too.
@@ -200,9 +208,15 @@ class ManagedClient:
             raise KeyError(f"{server_id} is not configured for this client")
         return self._locks.setdefault(server_id, asyncio.Lock())
 
-    def _authorize(self, server_id: str, tool: str) -> TrustRecord:
+    def _authorize(
+        self, server_id: str, tool: str, connection: _Connection | None = None
+    ) -> TrustRecord:
         record = self.store.get(server_id)
         reason = self._block_reason(record, tool)
+        if reason is None and connection is not None:
+            assert record is not None
+            if connection.session is None or connection.validated_revision != record.observed_revision:
+                reason = "session_not_validated"
         if reason == "policy_revision_changed":
             self.store.invalidate(server_id, actor="managed-client",
                                   reason="active policy revision changed")
@@ -226,7 +240,8 @@ class ManagedClient:
             return "tool_not_in_approved_revision"
         return None
 
-    async def _connection(self, server_id: str, *, observe_new: bool) -> _Connection:
+    async def _open_connection(self, server_id: str) -> _Connection:
+        """An open session; not necessarily validated for dispatch."""
         connection = self._connections.get(server_id)
         if connection is not None and connection.alive:
             return connection
@@ -235,12 +250,38 @@ class ManagedClient:
         connection = _Connection(self.servers[server_id], self._timeout)
         await connection.open()
         self._connections[server_id] = connection
-        if observe_new:
+        return connection
+
+    async def _validated_connection(self, server_id: str) -> _Connection:
+        """A session whose last successful observation matches the stored revision."""
+        connection = await self._open_connection(server_id)
+        record = self.store.get(server_id)
+        if (connection.validated_revision is None or record is None
+                or connection.validated_revision != record.observed_revision):
             await self._observe(server_id, connection)
         return connection
 
     async def _observe(self, server_id: str, connection: _Connection) -> TrustRecord:
-        assert connection.session is not None
+        connection.validated_revision = None
+        try:
+            tools = await self._list_tools(server_id, connection)
+            try:
+                revision = server_revision(tools)
+            except ValueError as exc:
+                raise ObservationError(f"invalid tools/list from {server_id}: {exc}") from exc
+            record = self.store.record_observation(server_id, revision, tools)
+        except Exception as exc:
+            # A failed or incomplete observation never leaves a session eligible.
+            self.store.record_event(server_id, "observation_failed", actor="managed-client",
+                                    detail={"error": f"{type(exc).__name__}: {exc}"[:500]})
+            await self._disconnect(server_id)
+            raise
+        connection.validated_revision = revision
+        return record
+
+    async def _list_tools(self, server_id: str, connection: _Connection) -> list[dict[str, Any]]:
+        if connection.session is None:
+            raise ObservationError(f"session for {server_id} is closed")
         tools: list[dict[str, Any]] = []
         cursor: str | None = None
         for _ in range(MAX_TOOL_LIST_PAGES):
@@ -252,14 +293,8 @@ class ManagedClient:
             tools.extend(tool_metadata(tool.model_dump(by_alias=True)) for tool in page.tools)
             cursor = page.nextCursor
             if not cursor:
-                break
-        else:
-            raise ObservationError(f"tools/list for {server_id} exceeded {MAX_TOOL_LIST_PAGES} pages")
-        try:
-            revision = server_revision(tools)
-        except ValueError as exc:
-            raise ObservationError(f"invalid tools/list from {server_id}: {exc}") from exc
-        return self.store.record_observation(server_id, revision, tools)
+                return tools
+        raise ObservationError(f"tools/list for {server_id} exceeded {MAX_TOOL_LIST_PAGES} pages")
 
     async def _disconnect(self, server_id: str) -> None:
         connection = self._connections.pop(server_id, None)

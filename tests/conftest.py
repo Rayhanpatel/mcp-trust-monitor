@@ -51,6 +51,10 @@ class DemoEnvironment:
     def restore_baseline(self) -> None:
         demo.clear_definition(self.state_dir)
 
+    def serve_raw(self, definition) -> None:
+        """Serve an arbitrary (possibly malformed) tools/list from the mutable server."""
+        demo.write_definition(self.state_dir, definition)
+
     @property
     def fixture(self) -> dict:
         return json.loads(FIXTURE_PATH.read_text())

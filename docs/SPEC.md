@@ -80,7 +80,7 @@ Use one Python service for orchestration and the managed client. Start with a se
 ### Observation and revisions
 
 - **REQ-REV-01 Revision digests.** A tool revision is the SHA-256 digest of canonical JSON (sorted keys, description text preserved exactly) containing the tool's name, description, and input schema. A server revision is the digest of its sorted `(tool name, tool revision)` pairs, so additions and removals are changes. Duplicate tool names make an observation invalid. Other MCP fields (title, annotations, output schema) are not yet covered.
-- **REQ-REV-02 Valid observations only.** Observation collects `tools/list` metadata only and never invokes `tools/call`. Complete pagination and validate responses before accepting an observation. A timeout, malformed response, or partial list is an observation error; it never yields a clean result or an approval.
+- **REQ-REV-02 Valid observations only.** Observation collects `tools/list` metadata only and never invokes `tools/call`. Complete pagination and validate responses before accepting an observation. A timeout, malformed response, or partial list is an observation error; it never yields a clean result or an approval, and it leaves no session eligible for dispatch until a later observation succeeds.
 - **REQ-REV-03 Capture metadata.** For each accepted observation, retain the UTC timestamp, logical server name, endpoint identity, version if available, transport, raw metadata, and origin (`live` or `synthetic_fixture`). Never persist authentication headers or credential-bearing URLs.
 
 A changed digest means changed metadata, not maliciousness.
@@ -100,7 +100,7 @@ Trust is scoped to `(managed client, server identity, server revision, policy re
 | Operator quarantine | Quarantined | Blocked |
 | Explicit operator restore of a named revision | Approved | Allowed |
 
-- **REQ-ENF-01 Dispatch gate.** The managed client reads the persisted trust state immediately before every `tools/call` transport dispatch, under a per-server lock that also serializes this client's own state changes. A blocked call is never written to the transport. The call path checks before connecting as well, so a blocked call never launches or contacts the server.
+- **REQ-ENF-01 Dispatch gate.** The managed client reads the persisted trust state immediately before every `tools/call` transport dispatch, under a per-server lock that also serializes this client's own state changes. A blocked call is never written to the transport. The call path checks before connecting as well, so a blocked call never launches or contacts the server. A session may dispatch only while its own last observation succeeded and matches the stored revision; otherwise it is re-observed first.
 - **REQ-ENF-02 Approved revision only.** A call is dispatched only when the server is approved, its current observed revision equals the approved revision, the approval's policy revision equals the active policy revision, and the tool exists in that revision. Every other condition blocks.
 - **REQ-ENF-03 Quarantine blocks dispatch.** After quarantine, no call reaches the server through the managed client and the server-side received-call count does not change. On quarantine the client closes that server's connection and drops its cached tool list.
 - **REQ-ENF-04 Isolation.** Blocking or quarantining one server does not affect calls to other approved servers.

@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from mcp_trust_monitor.managed_client import CallBlocked
+from mcp_trust_monitor.managed_client import CallBlocked, ObservationError
 from mcp_trust_monitor.revision import server_revision
 from mcp_trust_monitor.trust_store import StaleDecisionError, TrustState
 
@@ -209,6 +209,107 @@ async def test_tool_absent_from_approved_revision_is_blocked(env):
             await client.call_tool(LOOKUP, "delete_everything", {})
         assert blocked.value.reason == "tool_not_in_approved_revision"
     assert env.received_calls(LOOKUP) == 0
+
+
+MALFORMED_METADATA = {
+    # A valid MCP response that the client must reject (REQ-REV-01, REQ-REV-02).
+    "duplicate-tool-names": lambda fx: [fx["baseline"],
+                                        {**fx["baseline"], "description": "Shadow definition."}],
+    # Metadata the server cannot even serialize, so tools/list returns a JSON-RPC error.
+    "server-error": lambda fx: {**fx["baseline"], "inputSchema": "not-a-schema"},
+}
+
+
+@pytest.mark.parametrize("malformed", sorted(MALFORMED_METADATA))
+async def test_failed_observation_cannot_leave_a_connection_eligible_for_dispatch(env, malformed):
+    """Regression (review of c53b81c): a failed observation must not let a retry dispatch.
+
+    REQ-REV-02, REQ-ENF-01, REQ-TRU-03. Sequence from the review: approve the baseline,
+    close the client, serve malformed metadata, fail a call_tool, swap in the
+    private-content-demand fixture, and retry on the same client.
+    """
+    async with env.client() as first:
+        baseline = await observe_and_approve(first, LOOKUP)
+        await observe_and_approve(first, CONTROL)
+        await first.call_tool(LOOKUP, "lookup_document", ARGS)
+    assert env.received_calls(LOOKUP) == 1
+
+    env.serve_raw(MALFORMED_METADATA[malformed](env.fixture))
+    async with env.client() as client:
+        for _ in range(2):  # retries while the metadata is still malformed never dispatch
+            with pytest.raises(ObservationError):
+                await client.call_tool(LOOKUP, "lookup_document", ARGS)
+            assert not client.is_connected(LOOKUP)
+        assert env.received_calls(LOOKUP) == 1
+
+        env.mutate("private-content-demand")
+        with pytest.raises(CallBlocked) as blocked:
+            await client.call_tool(LOOKUP, "lookup_document", ARGS)
+        assert blocked.value.reason == "pending_review"
+        assert client.store.get(LOOKUP).state is TrustState.PENDING_REVIEW
+        assert env.received_calls(LOOKUP) == 1
+
+        # The unaffected control stays usable on the same client.
+        assert not (await client.call_tool(CONTROL, "health_check")).isError
+
+        # Recovery needs valid metadata and an explicit approval; reverting alone is not enough.
+        env.restore_baseline()
+        recovered = await client.observe(LOOKUP)
+        assert recovered.observed_revision == baseline.observed_revision
+        assert recovered.state is TrustState.PENDING_REVIEW
+        with pytest.raises(CallBlocked):
+            await client.call_tool(LOOKUP, "lookup_document", ARGS)
+        await client.approve(LOOKUP, revision=recovered.observed_revision,
+                             expected_generation=recovered.generation, actor="test-operator")
+        assert not (await client.call_tool(LOOKUP, "lookup_document", ARGS)).isError
+
+    assert env.received_calls(LOOKUP) == 2
+    assert env.received_calls(CONTROL) == 1
+    failures = [e for e in client.store.events(LOOKUP) if e["event_type"] == "observation_failed"]
+    assert len(failures) == 2
+
+
+async def test_failed_reobservation_of_an_open_session_requires_fresh_validation(env):
+    """REQ-REV-02, REQ-ENF-01: a validated session loses eligibility when re-observation fails."""
+    async with env.client() as client:
+        await observe_and_approve(client, LOOKUP)
+        await client.call_tool(LOOKUP, "lookup_document", ARGS)
+        assert client.is_connected(LOOKUP)
+
+        env.serve_raw(MALFORMED_METADATA["duplicate-tool-names"](env.fixture))
+        with pytest.raises(ObservationError):
+            await client.observe(LOOKUP)
+        assert not client.is_connected(LOOKUP)
+
+        env.mutate("private-content-demand")
+        with pytest.raises(CallBlocked) as blocked:
+            await client.call_tool(LOOKUP, "lookup_document", ARGS)
+        assert blocked.value.reason == "pending_review"
+    assert env.received_calls(LOOKUP) == 1
+
+
+async def test_session_validated_at_an_older_revision_is_revalidated_before_dispatch(env):
+    """REQ-ENF-01, REQ-TRU-02: a session is bound to the revision it last validated.
+
+    Another client approves revision B. The server then moves to revision C, which
+    nobody has observed. The first client's session, validated at A, must re-observe
+    before dispatch instead of trusting the persisted approval of B.
+    """
+    async with env.client() as client:
+        await observe_and_approve(client, LOOKUP)
+        await client.call_tool(LOOKUP, "lookup_document", ARGS)
+        assert client.is_connected(LOOKUP)
+
+        env.mutate("harmless-wording-change")
+        async with env.client() as other:
+            approved_b = await observe_and_approve(other, LOOKUP)
+        assert approved_b.state is TrustState.APPROVED
+
+        env.mutate("private-content-demand")
+        with pytest.raises(CallBlocked) as blocked:
+            await client.call_tool(LOOKUP, "lookup_document", ARGS)
+        assert blocked.value.reason == "pending_review"
+    assert env.received_calls(LOOKUP) == 1
 
 
 def test_cli_demo_walkthrough_runs():

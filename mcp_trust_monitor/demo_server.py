@@ -66,21 +66,26 @@ def scenario_definition(fixture: dict[str, Any], scenario_id: str) -> dict[str, 
     raise KeyError(f"unknown scenario {scenario_id}")
 
 
-def current_definition(
+def current_tools(
     fixture: dict[str, Any], state_dir: Path, server_id: str
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     override = server_dir(state_dir, server_id) / "definition.json"
     if server_id == MUTABLE_SERVER and override.exists():
-        return json.loads(override.read_text(encoding="utf-8"))
-    return baseline_definition(fixture, server_id)
+        definition = json.loads(override.read_text(encoding="utf-8"))
+        return definition if isinstance(definition, list) else [definition]
+    return [baseline_definition(fixture, server_id)]
 
 
-def write_definition(state_dir: Path, tool: dict[str, Any]) -> None:
-    """Change what the mutable server advertises on its next tools/list."""
+def write_definition(state_dir: Path, definition: dict[str, Any] | list[dict[str, Any]]) -> None:
+    """Change what the mutable server advertises on its next tools/list.
+
+    A dict is one tool. A list is served as the raw tool list, which lets tests
+    produce malformed responses such as duplicate tool names.
+    """
     path = server_dir(state_dir, MUTABLE_SERVER) / "definition.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(tool, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(definition, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -125,8 +130,7 @@ def build_server(server_id: str, state_dir: Path, fixture: dict[str, Any]) -> Se
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        tool = current_definition(fixture, state_dir, server_id)
-        return [types.Tool(**tool)]
+        return [types.Tool(**tool) for tool in current_tools(fixture, state_dir, server_id)]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
