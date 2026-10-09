@@ -4,16 +4,16 @@
 
 **What we built.** A managed MCP client that:
 - binds trust to the exact metadata revision an operator approved;
-- blocks the tool the moment its metadata changes;
+- blocks calls when changed metadata is observed;
 - reviews the change against an explicit operator policy;
-- quarantines it when the policy is violated;
+- quarantines it on a deterministic hard-deny match or a validated model recommendation;
 - proves the quarantine works by attempting a real call, which is refused before it is sent while the server's own call count stays unchanged.
 
 Every step is recorded and delivered to ClickHouse.
 
 ## How a change is handled
 
-1. **Observe.** `tools/list` metadata is digested into a revision. Any change moves the tool from `approved` to `pending_review`, so calls are blocked immediately, before any review.
+1. **Observe.** `tools/list` metadata is digested into a revision. An observed change moves the tool from `approved` to `pending_review`, so calls are blocked from that observation onward, before any review.
 2. **Deterministic check.** Semgrep runs the policy's hard-deny rules on tool descriptions. A match quarantines the revision automatically, and no model output can override it.
 3. **Model review.** The operator policy is retrieved from Senso, scoped to its content ID and verified against the policy file. OpenAI `gpt-6-astra` returns `review` or `quarantine` through a strict schema, with no tools and no ability to approve.
 4. **Validation.** Deterministic code accepts the recommendation only if its evidence spans appear verbatim in the metadata, its policy IDs exist, its cited sources were actually retrieved, and its revision, generation, and policy context are still current.
@@ -42,6 +42,7 @@ Every step is recorded and delivered to ClickHouse.
 - **Protection only through our managed client.** Enforcement happens in this project's client, immediately before transport dispatch. Agents that call MCP servers through other clients are not protected, and a call already dispatched before a quarantine may have executed.
 - **A scripted walkthrough, not continuous monitoring.** The demos run each step once. There is no polling loop, background delivery, or monitoring UI.
 - **Scan scope.** Semgrep checks tool descriptions only, so a clean scan means only "no hard-deny match in descriptions". Tool behavior is never assessed.
+- **No detection guarantee.** Quarantine requires a hard-deny match or a validated model recommendation. A violation that neither catches is not quarantined; it stays blocked in `pending_review` until an operator decides.
 - **Model limits.** The model is nondeterministic; the 6/6 evaluation is a single run. Validation proves the evidence is traceable, not that the reasoning is correct.
 - **Approval.** Operators can still approve a pending revision without a scan, by explicit, audited action.
 - **Verification evidence** relies on the demo servers' own request logs. Third-party servers have no such counter.
