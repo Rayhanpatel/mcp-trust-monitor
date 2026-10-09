@@ -203,6 +203,7 @@ class ManagedClient:
         policy_context: str,
         active_policy_context: Callable[[], str],
         detection: Mapping[str, Any],
+        actor: str = "hard-deny-detector",
     ) -> HardDenyOutcome:
         """Apply under the per-server lock. `active_policy_context` is evaluated here, at
         apply time, so a policy or rules change since the scan makes the result stale."""
@@ -210,7 +211,7 @@ class ManagedClient:
             outcome = self.store.apply_hard_deny(
                 server_id, revision=revision, generation=generation,
                 policy_revision=policy_context, active_policy_revision=active_policy_context(),
-                detection=detection,
+                detection=detection, actor=actor,
             )
             if outcome.status in ("applied", "already_quarantined"):
                 await self._disconnect(server_id)

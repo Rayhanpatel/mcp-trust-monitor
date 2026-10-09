@@ -496,6 +496,16 @@ class TrustStore:
         return {"pending": counts.get("pending", 0), "delivered": counts.get("delivered", 0),
                 "last_error": error["last_error"] if error else None}
 
+    def reviewed_tools_for_revision(
+        self, server_id: str, revision: str
+    ) -> tuple[dict[str, Any], ...] | None:
+        """The reviewed metadata recorded for one revision, if it was ever observed."""
+        row = self._db.execute(
+            "SELECT reviewed_metadata FROM observations WHERE client_id = ? AND server_id = ?"
+            " AND revision = ? ORDER BY ts DESC LIMIT 1",
+            (self.client_id, server_id, revision)).fetchone()
+        return tuple(json.loads(row["reviewed_metadata"])) if row else None
+
     def observations(self, server_id: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM observations WHERE client_id = ?"
         params: list[Any] = [self.client_id]

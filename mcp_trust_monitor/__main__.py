@@ -21,11 +21,17 @@ from . import history
 from .detector import DetectorError, verify_semgrep
 from .managed_client import CallBlocked, ManagedClient, trust_db_path
 from .policy import load_policy
+from .assessor import DEFAULT_MODEL, OpenAIAssessor
+from .evaluate import evaluate_cases, format_report, report_json
+from .model_review import ModelReviewReport, model_review
 from .review import review_server, verify_blocked
+from .senso import SensoClient, SensoError, load_env, retrieve_policy, upload_policy
 from .trust_store import StaleDecisionError, TrustError, TrustStore
 
 DEFAULT_STATE_DIR = demo.REPO_ROOT / "runtime" / "state"
 DEFAULT_POLICY = demo.REPO_ROOT / "policies" / "demo-policy.json"
+ENV_FILE = demo.REPO_ROOT / ".env"
+MODEL_SETTINGS = ("SENSO_API_KEY", "SENSO_POLICY_CONTENT_IDS", "OPENAI_API_KEY")
 
 
 def _client(args: argparse.Namespace, state_dir: Path | None = None,
@@ -181,16 +187,108 @@ def _print_detection(detection: dict | None) -> None:
         print(f"      evidence: {match['text']!r}")
 
 
+class SettingsMissing(Exception):
+    pass
+
+
+def _content_ids() -> list[str]:
+    value = load_env(["SENSO_POLICY_CONTENT_IDS"], ENV_FILE).get("SENSO_POLICY_CONTENT_IDS", "")
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _model_stage(args: argparse.Namespace) -> dict:
+    """Scoped Senso retrieval and the OpenAI assessor, from .env (values never printed)."""
+    env = load_env([*MODEL_SETTINGS, "MODEL_NAME"], ENV_FILE)
+    missing = [key for key in MODEL_SETTINGS if not env.get(key)]
+    if missing:
+        raise SettingsMissing(f"missing {', '.join(missing)}")
+    senso = SensoClient(env["SENSO_API_KEY"])
+    ids = _content_ids()
+    assessor = OpenAIAssessor(env["OPENAI_API_KEY"], env.get("MODEL_NAME") or DEFAULT_MODEL)
+    return {"retrieve": lambda: retrieve_policy(senso, ids, args.policy),
+            "assess": assessor.assess, "configured_content_ids": _content_ids,
+            "model": assessor.model, "response_id": lambda: assessor.last_response_id}
+
+
+def _print_model(report: ModelReviewReport) -> None:
+    if report.retrieved:
+        print(f"    Senso policy: {report.retrieved['policy_id']} revision "
+              f"{report.retrieved['revision']}, {report.retrieved['passages']} scoped passage(s) "
+              f"from {report.retrieved['content_ids']} verified; digest "
+              f"{report.retrieved['policy_digest'][:19]}")
+    if report.validated:
+        v = report.validated
+        print(f"    model {report.model}: recommends {v.recommendation} "
+              f"{list(v.policy_ids)}; validation passed (exact spans, retrieved sources)")
+        for item in v.evidence:
+            print(f"      evidence [{item['tool']}]: {item['text']!r}")
+    if report.rejected:
+        print(f"    model output REJECTED by validation: {'; '.join(report.rejected)}")
+    if report.error:
+        print(f"    model stage FAILED at {report.stage}: {report.error}")
+    print(f"    applied outcome: {report.outcome}")
+
+
 async def cmd_review(args: argparse.Namespace) -> int:
-    """One hard-deny review pass on persisted state; never approves."""
+    """Hard-deny review, then optionally the model stage. Never approves."""
+    stage = None
+    if args.model:
+        try:
+            stage = _model_stage(args)
+        except SettingsMissing as missing:
+            print(f"model stage unavailable: {missing}")
+            return 2
     async with _client(args) as client:
         report = await review_server(client, args.server, policy_path=args.policy)
-    print(f"{args.server}: {report.outcome} after {report.attempts} attempt(s)"
-          f"  revision {report.revision}")
-    _print_detection(report.detection)
-    if report.error:
-        print(f"    detector error: {report.error}")
-    return 0 if report.outcome in ("quarantined", "pending_review", "skipped") else 1
+        print(f"{args.server}: {report.outcome} after {report.attempts} attempt(s)"
+              f"  revision {report.revision}")
+        _print_detection(report.detection)
+        if report.error:
+            print(f"    detector error: {report.error}")
+        ok = report.outcome in ("quarantined", "pending_review", "skipped")
+        if stage is not None:
+            model = await model_review(client, args.server, policy_path=args.policy, **stage)
+            _print_model(model)
+            ok = ok and model.outcome not in ("failed", "stale")
+    return 0 if ok else 1
+
+
+async def cmd_senso_upload(args: argparse.Namespace) -> int:
+    """Upload only the operator policy to Senso and save its content ID in .env."""
+    env = load_env(["SENSO_API_KEY"], ENV_FILE)
+    if not env.get("SENSO_API_KEY"):
+        print("not uploaded: missing SENSO_API_KEY")
+        return 2
+    try:
+        result = upload_policy(SensoClient(env["SENSO_API_KEY"]), args.policy, ENV_FILE,
+                               force=args.force)
+    except SensoError as exc:
+        print(f"upload FAILED: {exc}")
+        return 1
+    verb = "uploaded and saved" if result["uploaded"] else "already configured (use --force)"
+    print(f"policy {verb}: SENSO_POLICY_CONTENT_IDS={','.join(result['content_ids'])}")
+    return 0
+
+
+async def cmd_evaluate(args: argparse.Namespace) -> int:
+    """Live evaluation of the fixed cases. Exit 1 if any required integration failed."""
+    try:
+        stage = _model_stage(args)
+    except SettingsMissing as missing:
+        print(f"evaluation unavailable: {missing}")
+        return 2
+    retrieval, results = await asyncio.to_thread(
+        evaluate_cases, demo.load_fixture(args.fixture), args.policy,
+        retrieve=stage["retrieve"], assess=stage["assess"])
+    print(format_report(retrieval, results))
+    if args.json:
+        Path(args.json).write_text(report_json(retrieval, results), encoding="utf-8")
+        print(f"report written to {args.json}")
+    failed = isinstance(retrieval, str) or any(
+        r.actual_hard_deny is None or r.model.startswith(("failed", "rejected")) for r in results)
+    if failed:
+        print("FAILED: at least one required integration failed; see notes")
+    return 1 if failed else 0
 
 
 def _deliver(store: TrustStore, settings: dict[str, str]) -> history.DeliveryResult:
@@ -360,6 +458,137 @@ async def cmd_demo_m2(args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_demo_m3(args: argparse.Namespace) -> int:
+    """M3 run: Semgrep finds nothing, the model (scoped Senso policy) decides, verified, ClickHouse.
+
+    Exits 0 only if every required integration worked and every check matched.
+    """
+    state_dir = Path(tempfile.mkdtemp(prefix="mcp-trust-demo-m3-"))
+    run_id = f"demo-m3-{uuid.uuid4()}"
+    lookup, control = demo.MUTABLE_SERVER, demo.CONTROL_SERVER
+    scenario = "private-content-without-address"
+    fixture = demo.load_fixture(args.fixture)
+    lookup_args = {"title": "Annual report"}
+    failures: list[str] = []
+    counter = demo.received_call_counter
+
+    def shown(server_id: str) -> str:
+        try:
+            return str(counter(state_dir, server_id)())
+        except demo.EvidenceUnavailable as exc:
+            return f"unavailable ({exc})"
+
+    async def call(client: ManagedClient, server_id: str, tool: str, arguments: dict) -> bool:
+        try:
+            result = await client.call_tool(server_id, tool, arguments)
+            print(f"    call {server_id}/{tool}: ok")
+            ok = not result.isError
+        except CallBlocked as blocked:
+            print(f"    call {server_id}/{tool}: BLOCKED before dispatch ({blocked.reason})")
+            ok = False
+        print(f"    server-side received tools/call count for {server_id}: {shown(server_id)}")
+        return ok
+
+    print(f"run id: {run_id}")
+    print(f"state directory: {state_dir}  (all data synthetic_fixture)")
+    try:
+        stage = _model_stage(args)
+        settings = history.load_settings()
+        print(f"[0] pinned Semgrep verified: {verify_semgrep()}; model {stage['model']}; "
+              "Senso, OpenAI, and ClickHouse settings present")
+    except (SettingsMissing, history.SettingsMissing, DetectorError) as exc:
+        print(f"[0] FAILED: required integration unavailable: {exc}")
+        return 1
+
+    async with _client(args, state_dir, run_id) as client:
+        print("[1] operator explicitly approves both baselines; normal calls succeed")
+        for server_id in (lookup, control):
+            record = await client.observe(server_id)
+            await client.approve(server_id, revision=record.observed_revision,
+                                 expected_generation=record.generation, actor="operator-demo")
+        if not await call(client, lookup, "lookup_document", lookup_args):
+            failures.append("baseline lookup")
+        if not await call(client, control, "health_check", {}):
+            failures.append("baseline control")
+
+        print(f"[2] the mutable server changes its description (scenario {scenario})")
+        demo.write_definition(state_dir, demo.scenario_definition(fixture, scenario))
+        changed = await client.observe(lookup)
+        print(f"    new description: {changed.observed_tools[0]['description']!r}")
+        print(f"    {lookup}: {changed.state.value} (approval invalidated), generation "
+              f"{changed.generation}")
+        started = time.perf_counter()
+
+        print("[3] deterministic hard-deny stage (real Semgrep)")
+        hard = await review_server(client, lookup, policy_path=args.policy)
+        hits = (hard.detection or {}).get("policy_ids", [])
+        print(f"    Semgrep: {hard.outcome}; hard-deny policy IDs {hits or 'none'}")
+        if hard.outcome == "detector_failed":
+            failures.append(f"Semgrep failed: {hard.error}")
+
+        print("[4] model stage: scoped Senso retrieval -> OpenAI -> validation -> apply")
+        model = await model_review(client, lookup, policy_path=args.policy, **stage)
+        _print_model(model)
+        if model.outcome in ("failed", "stale"):
+            failures.append(f"model stage {model.outcome}"
+                            + (f" at {model.stage}" if model.stage else ""))
+        state = client.store.get(lookup).state.value
+        print(f"    trust state: {state}")
+
+        print("[5] strict verification through the normal call path; control unaffected")
+        quarantine = model.quarantine if model.quarantine else hard.quarantine
+        if quarantine is None or quarantine.status != "applied":
+            failures.append(f"no applied quarantine to verify (outcome {model.outcome})")
+            await call(client, lookup, "lookup_document", lookup_args)
+        else:
+            verification = await verify_blocked(client, lookup, "lookup_document", lookup_args,
+                                                counter(state_dir, lookup), quarantine=quarantine)
+            print(f"    call {lookup}/lookup_document: blocked "
+                  f"({verification['blocked_reason']}); server-side count "
+                  f"{verification['received_before']} -> {verification['received_after']}: "
+                  + ("verified_blocked" if verification["verified"] else
+                     "VERIFICATION FAILED: " + "; ".join(verification["problems"])))
+            if not verification["verified"]:
+                failures.append("verification")
+        if not await call(client, control, "health_check", {}):
+            failures.append("control after quarantine")
+        print(f"    measured: observed change -> verification in "
+              f"{(time.perf_counter() - started) * 1000:.0f} ms (Semgrep + Senso + model)")
+        store = client.store
+
+    print("[6] deliver this run's outbox to ClickHouse and read it back")
+    database = settings["CLICKHOUSE_DATABASE"]
+    result = _deliver(store, settings)
+    print(f"    delivered {result.delivered}, pending {result.pending}")
+    if not result.ok:
+        print(f"    delivery error (sanitized): {result.error}")
+        failures.append("ClickHouse delivery")
+    else:
+        try:
+            read = history.read_history(history.ClickHouseHTTP(settings), database, run_id)
+        except Exception as exc:
+            secrets = history.secrets_of(settings)
+            print(f"    read-back FAILED (sanitized): "
+                  f"{history.sanitize(f'{type(exc).__name__}: {exc}', secrets)[:300]}")
+            failures.append("ClickHouse read-back")
+        else:
+            expected = store.outbox_status()["delivered"]
+            print(f"    ClickHouse: {read['raw_rows']} raw rows, {read['events']} distinct "
+                  f"event IDs; local delivered events: {expected}")
+            if read["events"] != expected or len(read["timeline"]) != expected:
+                failures.append("ClickHouse read-back mismatch")
+            for row in read["timeline"]:
+                if row["event_type"] == "observation_recorded":
+                    continue
+                print(f"    {row['ts']}  {row['server_id']:22} {row['event_type']:26} "
+                      f"{row['actor']:20} -> {row['to_state'] or '-'}")
+    if failures:
+        print(f"FAILED: {', '.join(failures)}")
+        return 1
+    print("M3 demo complete: all integrations worked and all checks matched")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m mcp_trust_monitor", description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
@@ -404,13 +633,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     review = commands.add_parser("review", help="hard-deny review of one server (never approves)")
     review.add_argument("server", choices=demo.DEMO_SERVERS)
+    review.add_argument("--model", action="store_true",
+                        help="then run the Senso + OpenAI model stage (M3)")
     review.set_defaults(run=cmd_review)
+
+    upload = commands.add_parser("senso-upload", help="upload the operator policy to Senso")
+    upload.add_argument("--force", action="store_true", help="upload even if already configured")
+    upload.set_defaults(run=cmd_senso_upload)
+
+    evaluate = commands.add_parser("evaluate", help="live evaluation of the fixed cases")
+    evaluate.add_argument("--json", help="also write the report as JSON to this path")
+    evaluate.set_defaults(run=cmd_evaluate)
 
     commands.add_parser("deliver", help="deliver pending history events to ClickHouse"
                         ).set_defaults(run=cmd_deliver)
     commands.add_parser("demo", help="run the scripted M1 walkthrough").set_defaults(run=cmd_demo)
     commands.add_parser("demo-m2", help="run the M2 hard-deny walkthrough and ClickHouse read-back"
                         ).set_defaults(run=cmd_demo_m2)
+    commands.add_parser("demo-m3", help="run the M3 model-review walkthrough (Senso + OpenAI)"
+                        ).set_defaults(run=cmd_demo_m3)
     return parser
 
 
