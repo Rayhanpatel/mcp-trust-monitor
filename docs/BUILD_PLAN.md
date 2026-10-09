@@ -51,12 +51,14 @@ Do not describe an unimplemented integration as sponsor usage. If an integration
 
 ## Submission checklist
 
-- [ ] Working autonomous action and verification captured on video.
-- [ ] Three eligible sponsor tools actually used and evidenced.
-- [ ] Fixture and live data clearly labeled.
-- [ ] No claims of malware discovery, universal protection, or automatic safe reapproval.
-- [ ] Repository accessible to reviewers; a private remote alone is insufficient.
+Status at the M3 freeze (9 October 2026). M4 and M5 were not built; see `docs/SUBMISSION.md`.
+
+- [ ] Working autonomous action and verification captured on video. Recording is in progress in `../mtm-record`, which must first be updated to the frozen commit.
+- [x] Three eligible sponsor tools actually used and evidenced: ClickHouse, Semgrep, and Senso, plus OpenAI. See `docs/EVIDENCE.md`.
+- [x] Fixture and live data clearly labeled: all demo and evaluation data is `synthetic_fixture`.
+- [x] No claims of malware discovery, universal protection, or automatic safe reapproval. `docs/SUBMISSION.md` states the limits.
+- [ ] Repository accessible to reviewers; a private remote alone is insufficient. The feature branches are not yet pushed or merged.
 - [ ] Video link works for a reviewer outside the account.
 - [ ] Team names, contact details, project description, and tools listed.
-- [ ] No credentials, venue details, or unrelated personal files published.
+- [x] No credentials in commits. Verified on 9 October 2026: the full history of `feat/m3-review` contains none of the ClickHouse host or password, the Senso key, or the OpenAI key. Recheck after any new commit, and review venue or personal files before publishing.
 - [ ] Submission sent before the deadline.

@@ -5,6 +5,35 @@ Branch `feat/m3-review`, based on the approved M2 commit `d1811e9`, in the workt
 - `feat/m2-history-detection` stays at `d1811e9`. M2 details: `git show d1811e9:docs/HANDOFF.md`.
 - `../mtm-record` and any video materials were not touched.
 
+## Submission freeze (after M3 approval at `67cd30c`)
+
+Feature development is frozen; M4 (polling) and M5 (UI) were not built. This freeze commit changes documentation only: `README.md`, `docs/SUBMISSION.md` (new, written for judges), `docs/BUILD_PLAN.md` (checklist), and this file. The code is identical to `67cd30c`.
+
+- **Full suite at `67cd30c`:** `uv run pytest` gave 142 passed in 83.7 s, with no failures.
+- **README check from a fresh clone** of `feat/m3-review`, with no `.env`:
+  - `uv sync --python 3.12` succeeded.
+  - Every documented command and flag exists: `demo`, `demo-m2`, `demo-m3`, `evaluate --json`, `senso-upload`, `review --model`, and `deliver`.
+  - Without credentials, `demo-m3` exits 1 and names only the missing settings.
+- **README fixes:**
+  - The `evaluate --json runtime/…` example failed on a fresh clone because `runtime/` doesn't exist, and it would fail only after spending model calls. It is now prefixed with `mkdir -p runtime`.
+  - The demo description now matches what `demo-m3` and `demo-m2` actually show.
+  - Setup now covers `.env`, and the demo section adds a ClickHouse warm-up step.
+- **Credentials:** the full history of `feat/m3-review` contains none of the four credential values (checked by value, reporting booleans only).
+- **Fallback:** `demo-m2` is unchanged and needs only Semgrep and ClickHouse.
+
+**Recording copy.** `../mtm-record` is a clean, detached worktree at `d1811e9` (M2), whose `.env` is a symlink to the shared file. It was **not** switched here; the recording session should switch it between takes:
+
+```sh
+cd /Users/rayhan/Desktop/Cyber-hack/mtm-record
+git status --short                      # must print nothing
+git checkout --detach feat/m3-review    # or the exact freeze commit SHA
+uv sync                                 # M3 adds the openai package
+uv run python scripts/smoke_clickhouse.py
+uv run python -m mcp_trust_monitor demo-m3
+# fallback if Senso or OpenAI fails during a take:
+uv run python -m mcp_trust_monitor demo-m2
+```
+
 ## Fix from the review of `6d09258`: every reported source must have contributed
 
 - **The gap.** `retrieve_policy` reported every *configured* content ID as retrieved, even one that returned nothing. With IDs A and B configured and the complete valid policy returned only from A, `RetrievedPolicy.content_ids` was `(A, B)`, so a model citing only B passed `validate_assessment`.

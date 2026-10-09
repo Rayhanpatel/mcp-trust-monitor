@@ -14,16 +14,22 @@ M3 adds:
 - an OpenAI `gpt-6-astra` assessment with strict Structured Outputs that can only recommend `review` or `quarantine`;
 - deterministic validation of that assessment, with validated quarantines applied through the same guarded transition as hard denials.
 
-Polling and the timeline view are not implemented yet; see [the handoff](docs/HANDOFF.md).
+Polling and the timeline view are not implemented; the demos are scripted walkthroughs, not continuous monitoring. For judges, see the [submission summary](docs/SUBMISSION.md); for status and evidence, see [the handoff](docs/HANDOFF.md).
 
 ## The product
 
 A tool trusted yesterday can advertise different instructions today. MCP Trust Monitor records that change, blocks the tool until the change is reviewed, determines whether it violates the operator's policy, and verifies that a quarantined connection can no longer receive calls through the managed client.
 
-The hackathon demo will show a controlled server changing its description, a deterministic hard-deny match and a model recommendation citing the applicable policy, a blocked call with an unchanged server-side call count, and an unaffected tool that keeps working. A harmless wording change is not quarantined; it stays blocked in pending review until the operator approves it.
+The demos run against two controlled synthetic MCP servers. Protection applies only to calls made through this project's managed client.
+
+- **`demo-m3`:** a server rewrites its description to exfiltrate private notes, in a way the deterministic rules cannot catch. The model, reading the policy retrieved from Senso, recommends quarantine with exact evidence. The validated quarantine blocks the next call before dispatch, the server-side call count stays unchanged, the unaffected tool keeps working, and the history is read back from ClickHouse.
+- **`demo-m2`:** shows the same flow driven by a deterministic Semgrep hard-deny match, without Senso or OpenAI.
+
+A harmless wording change is never quarantined; it stays blocked in pending review until the operator approves it.
 
 ## Read first
 
+- [Submission summary](docs/SUBMISSION.md): what it does, the four integrations, measured results, and limitations
 - [Product and technical specification](docs/SPEC.md): authoritative requirements with stable IDs
 - [Build plan and milestones](docs/BUILD_PLAN.md)
 - [Evidence provenance, claim limits, and integration status](docs/EVIDENCE.md)
@@ -37,7 +43,10 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.10 or newer (uv downloads
 
 ```sh
 uv sync --python 3.12
+cp .env.example .env    # then fill in the values; .env is ignored by Git and never printed
 ```
+
+`demo` and the tests need no credentials. `demo-m2` needs the ClickHouse values, and `demo-m3` also needs the Senso and OpenAI values.
 
 ## Run
 
@@ -57,9 +66,12 @@ M3 walkthrough, which also needs `SENSO_API_KEY`, `SENSO_POLICY_CONTENT_IDS`, an
 
 ```sh
 uv run python -m mcp_trust_monitor senso-upload   # once: uploads the policy, saves its content ID
+uv run python scripts/smoke_clickhouse.py         # warm ClickHouse first (idle services can time out)
 uv run python -m mcp_trust_monitor demo-m3        # Semgrep finds nothing; the model decides
-uv run python -m mcp_trust_monitor evaluate --json runtime/evaluation-m3.json
+mkdir -p runtime && uv run python -m mcp_trust_monitor evaluate --json runtime/evaluation-m3.json
 ```
+
+`demo-m3` and `evaluate` call Senso and OpenAI, and spend credits and tokens each run. Both exit nonzero if any required integration fails.
 
 `demo-m2` remains the fallback that needs only Semgrep and ClickHouse.
 
