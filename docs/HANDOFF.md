@@ -1,6 +1,8 @@
 # Handoff: M0 and M1
 
-Branch `feat/m1-enforcement`, based on `main` at `f257116`. Two commits: M0 (documents) and M1 (enforcement boundary). Not merged. Stopped for review.
+Branch `feat/m1-enforcement`, based on `main` at `f257116`. Three commits: M0 (documents), M1 (enforcement boundary), and an M0 follow-up recording the ClickHouse smoke test once credentials arrived. Not merged. Stopped for review.
+
+Not part of this review: unfinished, unreviewed M2/M3 local work (Semgrep hard-deny detector, decision combiner, review loop) was paused on the separate branch `feat/m2-local-detection`, stacked on this one, at the user's request to stop at this checkpoint. Its new modules are untested.
 
 ## Requirements completed
 
@@ -41,11 +43,13 @@ These affect product behavior. Each was resolved conservatively and recorded in 
 3. **Observing a quarantined server is allowed.** It is explicit and metadata-only, so later revisions are still recorded. For a stdio server this launches its process. The call path never launches a blocked server.
 4. **Case `private-content-without-address`** expects quarantine under POL-001, but the narrower POL-001 hard-deny condition does not apply, so only the model can reach the expected outcome. The expectation follows the policy text and was written before any detector or model run. Check that this is a legitimate fixed case, not tuning in the model's favor. `benign-policy-mention` is the counterpart that checks that rules do not over-match.
 5. **CLI approval without `--generation`** binds to the revision and policy only. SPEC REQ-TRU-02 allows this; programmatic decisions should pass the generation.
+6. **Model provider.** `.env.example` now names `ANTHROPIC_API_KEY` and `MODEL_NAME` (default `claude-opus-5-5`, called through the official `anthropic` SDK) instead of the generic `MODEL_API_KEY`. The alternative is AkashML's OpenAI-compatible endpoint, which could add an Akash sponsor contribution; it needs a different adapter and variable names.
 
 ## Changed files
 
 - M0: `docs/SPEC.md`, `docs/BUILD_PLAN.md`, `docs/EVIDENCE.md`, `policies/demo-policy.json`, `fixtures/tool_changes.json`, `CLAUDE.md` (new).
 - M1: `pyproject.toml`, `uv.lock`, `mcp_trust_monitor/{__init__,__main__,demo_server,managed_client,policy,revision,trust_store}.py`, `tests/{conftest,test_enforcement,test_fixtures,test_revision,test_trust_store}.py`, `README.md`, `docs/HANDOFF.md`.
+- M0 follow-up: `scripts/smoke_clickhouse.py` (new), `.env.example`, `docs/EVIDENCE.md`, `README.md`, `docs/HANDOFF.md`.
 
 ## Commands and results
 
@@ -56,7 +60,8 @@ These affect product behavior. Each was resolved conservatively and recorded in 
 | `uv run python -m mcp_trust_monitor demo` | Completes in about 2 s. Blocked calls leave `demo/document-lookup` at 2 received calls through quarantine and restart; the control rises to 3 |
 | Manual CLI sequence in README | Run against a scratch state directory. Blocked call exits 3; approving a quarantined server exits 2 with "requires an explicit restore" |
 | `uvx --from semgrep==1.180.0 semgrep scan --metrics=off --json --config <smoke rule> <fixture descriptions>` | 2 matches, 0 errors, no login. See [EVIDENCE.md](EVIDENCE.md#integration-smoke-tests) |
-| ClickHouse, Senso, model API | Blocked: no credentials configured. Nothing was contacted or mocked |
+| `uv run python scripts/smoke_clickhouse.py` | 8 of 8 checks passed against ClickHouse Cloud 26.6.1.2326: connectivity, `mcp_trust_monitor` exists, temporary-table insert and read-back, `CREATE TABLE` and `INSERT` grants. No persistent change. See [EVIDENCE.md](EVIDENCE.md#integration-smoke-tests) |
+| Senso, model API | Blocked: no `SENSO_API_KEY` or `ANTHROPIC_API_KEY`. Nothing was contacted or mocked |
 
 ## Limitations
 
@@ -69,4 +74,4 @@ These affect product behavior. Each was resolved conservatively and recorded in 
 
 ## Remaining work
 
-Follow [BUILD_PLAN.md](BUILD_PLAN.md): M2 (ClickHouse outbox and history, Semgrep hard-deny rules with offset-based evidence spans), M3 (Senso scoped retrieval, model recommendation, validator, evaluation report), M4 (autonomous poll-detect-quarantine-verify loop with freshness), M5 (minimal timeline page), M6 (recording and submission). ClickHouse, Senso, and model credentials are needed before M2 and M3 can claim sponsor usage.
+Follow [BUILD_PLAN.md](BUILD_PLAN.md): M2 (ClickHouse outbox and history, Semgrep hard-deny rules with offset-based evidence spans), M3 (Senso scoped retrieval, model recommendation, validator, evaluation report), M4 (autonomous poll-detect-quarantine-verify loop with freshness), M5 (minimal timeline page), M6 (recording and submission). ClickHouse is ready for M2. Senso (`SENSO_API_KEY`; the content id comes from uploading the policy) and model (`ANTHROPIC_API_KEY`) credentials are still needed before M3 can claim sponsor usage.

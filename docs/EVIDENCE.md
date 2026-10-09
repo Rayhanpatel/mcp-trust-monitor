@@ -36,12 +36,12 @@ The project specification proposes behavior; it is not evidence that those capab
 
 ## Integration smoke tests
 
-Run on 9 October 2026 during M0. Only Semgrep was exercised; nothing below is mocked.
+Run on 9 October 2026 during M0. Semgrep and ClickHouse were exercised against the real tools; nothing below is mocked.
 
 | Integration | Result | Detail |
 | --- | --- | --- |
 | Semgrep (local) | Working | Semgrep 1.180.0 run ephemerally with `uvx`, no login. A throwaway custom `generic`-language rule scanned the fixture descriptions: 2 matches, 0 errors. When logged out, `extra.lines` is the literal string `requires login`; exact evidence spans must be sliced from the scanned bytes using `start.offset` and `end.offset`, which was verified. Not installed globally. |
-| ClickHouse | Blocked | No `CLICKHOUSE_*` credentials in the environment or any `.env` file. Not contacted. |
+| ClickHouse Cloud | Working | `uv run python scripts/smoke_clickhouse.py` (HTTPS interface, credentials from `.env`): 8 of 8 checks passed against server 26.6.1.2326. `SELECT 1`; database `mcp_trust_monitor` exists; a session-scoped temporary table accepted a `JSONEachRow` insert and returned it; `CHECK GRANT` confirms `CREATE TABLE` and `INSERT` on the database. Each request took about 190–310 ms. No persistent table was created. The application does not write to ClickHouse yet (M2). |
 | Senso | Blocked | No `SENSO_API_KEY` or policy content IDs, and the `senso` CLI is not installed. Not contacted. |
 | Model API | Blocked | No `MODEL_API_KEY` or provider key configured. The coding assistant's own session is not an application credential. Not contacted. |
 

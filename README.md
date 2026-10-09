@@ -59,6 +59,12 @@ uv run pytest
 
 The enforcement tests in `tests/test_enforcement.py` launch the demo servers as real stdio MCP subprocesses and compare against each server's own received-request log. Trust-store and revision tests run in process.
 
+Integration smoke test. Copy `.env.example` to `.env` and fill in the ClickHouse values first. It prints check results only, never credentials, and makes no persistent change:
+
+```sh
+uv run python scripts/smoke_clickhouse.py
+```
+
 ## What is here
 
 | Path | Purpose |
@@ -69,11 +75,12 @@ The enforcement tests in `tests/test_enforcement.py` launch the demo servers as 
 | `mcp_trust_monitor/demo_server.py` | Controlled mutable server and unaffected control, with received-request logs |
 | `mcp_trust_monitor/__main__.py` | Command line and scripted demo |
 | `tests/` | Focused behavior tests |
+| `scripts/smoke_clickhouse.py` | ClickHouse Cloud connectivity and permission smoke test |
 | `fixtures/tool_changes.json` | Synthetic baseline, control, and fixed evaluation cases |
 | `policies/demo-policy.json` | Operator-authored policy with hard-deny conditions and decision authority |
 | `tools/registry_probe_prototype.py` | Inherited metadata-discovery experiment; not a hardened collector |
 | `data/evidence_manifest.json` | Count and digest of the earlier research snapshot |
-| `.env.example` | Placeholders for planned integrations |
+| `.env.example` | Exact variable names for ClickHouse, Senso, and the model |
 
 The saved research snapshot contains 35 server records and 287 tool definitions. It is a sample, not a registry census or a malware dataset, and public registry ingestion is deferred. See the evidence notes for provenance.
 
