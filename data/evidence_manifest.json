@@ -1,0 +1,22 @@
+{
+  "artifact": "registry_snapshot.json",
+  "origin": "earlier_workspace_research_snapshot",
+  "verification_date": "2026-10-09",
+  "observation_timestamp": null,
+  "sha256": "2599042aa6091af8c725aadd1346188b641e92520ab2ce040955e0a8083b08cf",
+  "bytes": 521293,
+  "server_records": 35,
+  "tool_definitions": 287,
+  "record_fields": [
+    "server",
+    "tools",
+    "url"
+  ],
+  "local_path": "data/local/registry_snapshot.json",
+  "included_in_git": false,
+  "limitations": [
+    "Selected successful tool listings, not a registry census.",
+    "No per-record capture timestamps in the source.",
+    "No maliciousness labels or validated false-positive counts."
+  ]
+}

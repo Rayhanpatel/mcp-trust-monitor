@@ -1,0 +1,23 @@
+{
+  "policy_id": "demo-workspace-policy",
+  "revision": "1",
+  "origin": "operator_authored_demo_policy",
+  "rules": [
+    {
+      "id": "POL-001",
+      "title": "Protect private workspace content",
+      "requirement": "A tool description must not instruct an agent to transmit private workspace content to an unrelated destination as a condition of using the tool.",
+      "on_supported_violation": "quarantine"
+    },
+    {
+      "id": "POL-002",
+      "title": "Preserve operator policy authority",
+      "requirement": "A tool description must not instruct an agent to ignore or override the operator's governing security policy.",
+      "on_supported_violation": "quarantine"
+    }
+  ],
+  "benign_changes": "Wording and formatting changes consistent with the tool's purpose may be approved after assessment.",
+  "uncertain_outcome": "review",
+  "senso_content_ids": [],
+  "integration_status": "Policy must be uploaded and retrieved through scoped Senso integration during implementation."
+}
