@@ -2,7 +2,8 @@
 
 import pytest
 
-from mcp_trust_monitor.trust_store import StaleDecisionError, TrustError, TrustState, TrustStore
+from mcp_trust_monitor.trust_store import (ObservationRequiredError, StaleDecisionError,
+                                           TrustError, TrustState, TrustStore)
 
 POLICY = "demo-workspace-policy@2#sha256:test"
 TOOLS_A = [{"name": "t", "description": "A", "inputSchema": {"type": "object"}}]
@@ -98,7 +99,12 @@ def test_observation_failure_invalidates_approval_and_preserves_quarantine(store
     event = store.events("s")[-1]
     assert (event["event_type"], event["from_state"], event["to_state"]) == (
         "observation_failed", "approved", "pending_review")
-    with pytest.raises(StaleDecisionError):  # decisions made before the failure are stale
+    # A decision made before the failure is refused until fresh evidence exists...
+    with pytest.raises(ObservationRequiredError):
+        approve(store, approved)
+    # ...and remains stale after it, because the generation has moved on.
+    store.record_observation("s", "rev-a", TOOLS_A)
+    with pytest.raises(StaleDecisionError):
         approve(store, approved)
 
     store.quarantine("s", actor="test", reason="test")
@@ -107,6 +113,52 @@ def test_observation_failure_invalidates_approval_and_preserves_quarantine(store
 
     assert store.record_observation_failure("unknown", actor="test", error="boom") is None
     assert store.events("unknown")[-1]["event_type"] == "observation_failed"
+
+
+def test_approval_and_restore_require_a_successful_observation_after_failure(store, tmp_path):
+    """REQ-REV-02: recovery needs fresh evidence first, then an explicit decision."""
+    approve(store, store.record_observation("s", "rev-a", TOOLS_A))
+    failed = store.record_observation_failure("s", actor="test", error="boom")
+    assert failed.observation_failed_at is not None
+    with pytest.raises(ObservationRequiredError):  # stored revision and current generation
+        approve(store, failed)
+    store.close()
+
+    reopened = TrustStore(tmp_path / "trust.sqlite3")  # persisted across restart
+    persisted = reopened.get("s")
+    assert persisted.observation_failed_at == failed.observation_failed_at
+    with pytest.raises(ObservationRequiredError):
+        approve(reopened, persisted)
+
+    # Unchanged metadata is recovery evidence: it clears the requirement, bumps the
+    # generation so earlier decisions are stale, and never restores approval itself.
+    recovered = reopened.record_observation("s", "rev-a", TOOLS_A)
+    assert recovered.observation_failed_at is None
+    assert recovered.state is TrustState.PENDING_REVIEW
+    assert recovered.generation == persisted.generation + 1
+    assert reopened.events("s")[-1]["event_type"] == "observation_recovered"
+    with pytest.raises(StaleDecisionError):
+        approve(reopened, persisted)
+
+    # Another failure before approval re-arms the requirement.
+    reopened.record_observation_failure("s", actor="test", error="again")
+    with pytest.raises(ObservationRequiredError):
+        approve(reopened, reopened.get("s"))
+    assert approve(reopened, reopened.record_observation("s", "rev-a", TOOLS_A)).state is (
+        TrustState.APPROVED)
+
+
+def test_restore_of_quarantine_requires_a_successful_observation_after_failure(store):
+    """REQ-REV-02, REQ-TRU-04: a failure keeps quarantine and also gates its restore."""
+    approve(store, store.record_observation("s", "rev-a", TOOLS_A))
+    store.quarantine("s", actor="test", reason="test")
+    failed = store.record_observation_failure("s", actor="test", error="boom")
+    assert failed.state is TrustState.QUARANTINED
+    with pytest.raises(ObservationRequiredError):
+        approve(store, failed, restore=True)
+    recovered = store.record_observation("s", "rev-a", TOOLS_A)
+    assert recovered.state is TrustState.QUARANTINED  # observation never lifts quarantine
+    assert approve(store, recovered, restore=True).state is TrustState.APPROVED
 
 
 def test_approval_records_policy_revision(store):

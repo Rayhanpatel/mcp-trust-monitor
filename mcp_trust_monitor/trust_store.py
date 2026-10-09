@@ -35,6 +35,10 @@ class StaleDecisionError(TrustError):
     """A decision no longer matches the server's current revision, policy, or generation."""
 
 
+class ObservationRequiredError(TrustError):
+    """Approval or restore attempted before a successful observation followed a failure."""
+
+
 @dataclass(frozen=True)
 class TrustRecord:
     client_id: str
@@ -46,6 +50,8 @@ class TrustRecord:
     approved_policy_revision: str | None
     generation: int
     updated_at: str
+    # Set by an observation failure; cleared only by a later successful observation.
+    observation_failed_at: str | None = None
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -64,6 +70,7 @@ CREATE TABLE IF NOT EXISTS trust_records (
     approved_policy_revision TEXT,
     generation INTEGER NOT NULL,
     updated_at TEXT NOT NULL,
+    observation_failed_at TEXT,
     PRIMARY KEY (client_id, server_id)
 );
 CREATE TABLE IF NOT EXISTS trust_events (
@@ -99,6 +106,9 @@ class TrustStore:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=FULL")
         self._db.executescript(_SCHEMA)
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(trust_records)")}
+        if "observation_failed_at" not in columns:  # stores created before this column
+            self._db.execute("ALTER TABLE trust_records ADD COLUMN observation_failed_at TEXT")
 
     def close(self) -> None:
         self._db.close()
@@ -152,19 +162,27 @@ class TrustStore:
                 new = self._require(server_id)
                 self._event(new, "observed_new", actor, None, new.state, revision)
                 return new
-            if current.observed_revision == revision:
+            recovering = current.observation_failed_at is not None
+            if current.observed_revision == revision and not recovering:
                 return current
-            # Metadata changed. Approval is invalidated; quarantine is never lifted here.
+            # Metadata changed, or this observation follows a failure. Approval is never
+            # restored here and quarantine is never lifted; a change invalidates approval.
             next_state = (
                 TrustState.PENDING_REVIEW
                 if current.state is TrustState.APPROVED
                 else current.state
             )
             self._update(current, state=next_state, observed_revision=revision,
-                         observed_tools=tools_json)
+                         observed_tools=tools_json, observation_failed_at=None)
             new = self._require(server_id)
-            self._event(new, "revision_changed", actor, current.state, new.state, revision,
-                        detail={"previous_revision": current.observed_revision})
+            if recovering:
+                # Recovery evidence (REQ-REV-02): approval becomes possible again, not automatic.
+                self._event(new, "observation_recovered", actor, current.state, new.state,
+                            revision, detail={"failed_at": current.observation_failed_at,
+                                              "unchanged": current.observed_revision == revision})
+            if current.observed_revision != revision:
+                self._event(new, "revision_changed", actor, current.state, new.state, revision,
+                            detail={"previous_revision": current.observed_revision})
             return new
 
     def approve(
@@ -177,11 +195,20 @@ class TrustStore:
         actor: str,
         restore: bool = False,
     ) -> TrustRecord:
-        """Explicit operator approval of one exact revision under one policy revision."""
+        """Explicit operator approval of one exact revision under one policy revision.
+
+        Refused (as is restore) while an observation failure has not been followed
+        by a complete successful observation (REQ-REV-02).
+        """
         with self._transaction():
             current = self.get(server_id)
             if current is None or current.observed_revision is None:
                 raise StaleDecisionError(f"{server_id} has no observed revision to approve")
+            if current.observation_failed_at is not None:
+                raise ObservationRequiredError(
+                    f"{server_id} had an observation failure at {current.observation_failed_at};"
+                    " observe it successfully before approving or restoring"
+                )
             if (
                 current.state is TrustState.APPROVED
                 and current.approved_revision == revision
@@ -237,10 +264,12 @@ class TrustStore:
     ) -> TrustRecord | None:
         """A connection, initialization, or tools/list failure (REQ-REV-02).
 
-        In one transaction: an approved server moves to pending review (bumping the
-        generation) and `observation_failed` is recorded. Quarantine and other states
-        are preserved. Every session of this managed client then blocks, because
-        they all authorize against this record.
+        In one transaction: an approved server moves to pending review,
+        `observation_failed_at` is set, the generation is bumped, and
+        `observation_failed` is recorded. Quarantine and other states are preserved.
+        Every session of this managed client then blocks, because they all authorize
+        against this record, and approve/restore are refused until a later
+        successful observation clears `observation_failed_at`.
         """
         detail = {"error": error[:500]}
         with self._transaction():
@@ -252,8 +281,12 @@ class TrustStore:
                     (str(uuid.uuid4()), _now(), self.client_id, server_id, actor,
                      json.dumps(detail)))
                 return None
-            if current.state is TrustState.APPROVED:
-                self._update(current, state=TrustState.PENDING_REVIEW)
+            next_state = (
+                TrustState.PENDING_REVIEW
+                if current.state is TrustState.APPROVED
+                else current.state
+            )
+            self._update(current, state=next_state, observation_failed_at=_now())
             new = self._require(server_id)
             self._event(new, "observation_failed", actor, current.state, new.state,
                         current.observed_revision, detail=detail)
@@ -306,17 +339,19 @@ class TrustStore:
             "observed_tools": json.dumps(list(current.observed_tools), sort_keys=True),
             "approved_revision": current.approved_revision,
             "approved_policy_revision": current.approved_policy_revision,
+            "observation_failed_at": current.observation_failed_at,
         }
         for key, value in changes.items():
             values[key] = value.value if isinstance(value, TrustState) else value
         cursor = self._db.execute(
             "UPDATE trust_records SET state = ?, observed_revision = ?, observed_tools = ?,"
-            " approved_revision = ?, approved_policy_revision = ?, generation = ?,"
-            " updated_at = ? WHERE client_id = ? AND server_id = ? AND generation = ?",
+            " approved_revision = ?, approved_policy_revision = ?, observation_failed_at = ?,"
+            " generation = ?, updated_at = ? WHERE client_id = ? AND server_id = ?"
+            " AND generation = ?",
             (values["state"], values["observed_revision"], values["observed_tools"],
              values["approved_revision"], values["approved_policy_revision"],
-             current.generation + 1, _now(), self.client_id, current.server_id,
-             current.generation),
+             values["observation_failed_at"], current.generation + 1, _now(), self.client_id,
+             current.server_id, current.generation),
         )
         if cursor.rowcount != 1:
             raise StaleDecisionError(f"{current.server_id} changed during the transition")
@@ -365,4 +400,5 @@ def _record(row: sqlite3.Row) -> TrustRecord:
         approved_policy_revision=row["approved_policy_revision"],
         generation=row["generation"],
         updated_at=row["updated_at"],
+        observation_failed_at=row["observation_failed_at"],
     )

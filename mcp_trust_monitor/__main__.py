@@ -35,6 +35,9 @@ def _print_record(record: Any) -> None:
     print(f"  observed revision: {record.observed_revision}")
     print(f"  approved revision: {record.approved_revision}")
     print(f"  approved under policy: {record.approved_policy_revision}")
+    if record.observation_failed_at is not None:
+        print(f"  observation failed at {record.observation_failed_at}; "
+              "observe successfully before approving or restoring")
 
 
 def _result_text(result: Any) -> str:

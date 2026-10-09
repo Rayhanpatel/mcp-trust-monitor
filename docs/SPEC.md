@@ -83,7 +83,11 @@ Use one Python service for orchestration and the managed client. Start with a se
 - **REQ-REV-02 Valid observations only.** Observation collects `tools/list` metadata only and never invokes `tools/call`. Complete pagination and validate responses before accepting an observation. A connection or initialization failure, timeout, malformed response, or partial list is an observation failure, and it never yields a clean result or an approval.
   - In one local transaction, an approved server moves to pending review and `observation_failed` is recorded. A quarantined server stays quarantined.
   - Every session of that managed client then blocks, not only the one that failed, and the failing session is closed.
-  - Recovery requires a successful observation of valid metadata and explicit operator approval.
+  - Recovery requires a successful observation of valid metadata, then explicit operator approval, in that order. The trust store enforces this:
+    - Approve and restore are refused until a complete successful observation is recorded after the latest failure.
+    - The requirement is persisted and survives restart.
+    - The recovering observation counts as evidence even when the metadata is unchanged. It bumps the generation, so earlier decisions become stale, but it never restores approval by itself.
+    - Another failure before approval re-arms the requirement.
 - **REQ-REV-03 Capture metadata.** For each accepted observation, retain the UTC timestamp, logical server name, endpoint identity, version if available, transport, raw metadata, and origin (`live` or `synthetic_fixture`). Never persist authentication headers or credential-bearing URLs.
 
 A changed digest means changed metadata, not maliciousness.
@@ -95,14 +99,14 @@ Trust is scoped to `(managed client, server identity, server revision, policy re
 | Event | Next state | New calls through the client |
 | --- | --- | --- |
 | First observation | Unreviewed | Blocked |
-| Explicit operator approval of the current revision | Approved | Allowed |
+| Explicit operator approval of the current revision (refused while an observation failure awaits a successful observation) | Approved | Allowed |
 | Approved revision observed unchanged | Approved | Allowed |
 | Observed metadata or active policy changes | Pending review | Blocked |
 | Observation failure (connection, initialization, or `tools/list`) | Pending review; quarantine preserved | Blocked |
 | Validated review recommendation, or an assessment failure | Pending review | Blocked |
 | Hard-deny match or validated quarantine recommendation | Quarantined | Blocked |
 | Operator quarantine | Quarantined | Blocked |
-| Explicit operator restore of a named revision | Approved | Allowed |
+| Explicit operator restore of a named revision (same observation requirement) | Approved | Allowed |
 
 - **REQ-ENF-01 Dispatch gate.** The managed client reads the persisted trust state immediately before every `tools/call` transport dispatch, under a per-server lock that also serializes this client's own state changes. A blocked call is never written to the transport. The call path checks before connecting as well, so a blocked call never launches or contacts the server. A session may dispatch only while its own last observation succeeded and matches the stored revision; otherwise it is re-observed first.
 - **REQ-ENF-02 Approved revision only.** A call is dispatched only when the server is approved, its current observed revision equals the approved revision, the approval's policy revision equals the active policy revision, and the tool exists in that revision. Every other condition blocks.
@@ -112,7 +116,7 @@ Trust is scoped to `(managed client, server identity, server revision, policy re
 - **REQ-TRU-01 Explicit approval.** The first observation of a server is unreviewed. An observed baseline is not an approved baseline; the demo's initial approvals are explicit operator actions.
 - **REQ-TRU-02 Revision binding.** Every authorizing decision names the exact server revision and is bound to the active policy revision. It is rejected unless that revision is still current; when it also names a generation, that generation must still be current. A stale decision can never authorize a newer revision.
 - **REQ-TRU-03 Change invalidation.** An observed metadata change, or a change of active policy, moves an approved server to pending review before the next dispatch. Observing a previously approved revision again does not restore approval.
-- **REQ-TRU-04 Persistent quarantine.** Trust transitions are persisted atomically and survive client restart. Quarantine is lifted only by an explicit operator restore of a named revision, which records its actor. No observation, reconnection, or reset lifts it.
+- **REQ-TRU-04 Persistent quarantine.** Trust transitions are persisted atomically and survive client restart. Quarantine is lifted only by an explicit operator restore of a named revision, which records its actor. After an observation failure, a restore is also refused until a successful observation follows it (REQ-REV-02). No observation, reconnection, or reset lifts it.
 - **REQ-TRU-05 Operator approval of changes.** Changed definitions become callable only through explicit operator approval. A harmless description change remains pending review until then. Do not claim automatic safe reapproval.
 - **REQ-TRU-06 Idempotent decisions.** A duplicate decision does not repeat side effects.
 - **REQ-TRU-07 Observation freshness.** When polling is enabled, an observation older than two configured poll intervals blocks new calls until refreshed. A disconnected server keeps its trust record and is shown as stale, never as a successful scan.

@@ -49,7 +49,7 @@ uv run python -m mcp_trust_monitor mutate --scenario private-content-demand   # 
 uv run python -m mcp_trust_monitor approve demo/document-lookup --revision <revision> --restore           # lift quarantine explicitly
 ```
 
-`call` exits 0 on success, 1 on a tool error, and 3 when blocked before dispatch. A refused decision, such as a stale or quarantined approval, exits 2. To start over, delete `runtime/state/`; that is the only way to discard a quarantine without an explicit restore.
+`call` exits 0 on success, 1 on a tool error, and 3 when blocked before dispatch. A refused decision, such as a stale or quarantined approval, exits 2. After a failed observation, the server stays in pending review, and `approve` (including `--restore`) is refused until `observe` succeeds again. Run `observe`, check `status`, then approve. To start over, delete `runtime/state/`; that is the only way to discard a quarantine without an explicit restore.
 
 ## Test
 

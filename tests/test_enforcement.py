@@ -16,7 +16,7 @@ import pytest
 from mcp_trust_monitor import demo_server as demo
 from mcp_trust_monitor.managed_client import CallBlocked, ObservationError
 from mcp_trust_monitor.revision import server_revision
-from mcp_trust_monitor.trust_store import StaleDecisionError, TrustState
+from mcp_trust_monitor.trust_store import ObservationRequiredError, StaleDecisionError, TrustState
 
 from conftest import CONTROL, FIXTURE_PATH, LOOKUP, observe_and_approve
 
@@ -339,6 +339,109 @@ async def test_observation_failure_in_one_session_blocks_every_session(env, fail
 
     assert env.received_calls(LOOKUP) == 2
     assert env.received_calls(CONTROL) == 2
+
+
+@pytest.mark.parametrize("failure", OBSERVATION_FAILURES)
+async def test_approval_after_a_failure_requires_a_successful_observation(env, failure):
+    """Regression (review of f3afdab): no approval on stale evidence after a failure.
+
+    REQ-REV-02, REQ-TRU-02. Review sequence: A and B validate the approved baseline;
+    A's observation fails; the server switches to private-content-demand; the operator
+    approves through B with the stored revision and current generation, without a
+    successful observation in between.
+    """
+    async with env.client() as a, env.client() as b:
+        baseline = await observe_and_approve(a, LOOKUP)
+        await observe_and_approve(a, CONTROL)
+        await b.observe(LOOKUP)
+
+        induce_observation_failure(env, failure)
+        if failure == "startup-failure":
+            await a.aclose()
+        with pytest.raises(ObservationError):
+            await a.observe(LOOKUP)
+        failed = b.store.get(LOOKUP)
+        assert failed.state is TrustState.PENDING_REVIEW
+        assert failed.observation_failed_at is not None
+
+        clear_observation_failure(env)
+        env.mutate("private-content-demand")
+        with pytest.raises(ObservationRequiredError):
+            await b.approve(LOOKUP, revision=failed.observed_revision,
+                            expected_generation=failed.generation, actor="premature-operator")
+        with pytest.raises(CallBlocked) as blocked:
+            await b.call_tool(LOOKUP, "lookup_document", ARGS)
+        assert blocked.value.reason == "pending_review"
+        assert env.received_calls(LOOKUP) == 0
+        assert not (await b.call_tool(CONTROL, "health_check")).isError
+
+        # A successful observation is recovery evidence; here it records the changed metadata.
+        changed = await b.observe(LOOKUP)
+        assert changed.observation_failed_at is None
+        assert changed.observed_revision != baseline.observed_revision
+        assert changed.state is TrustState.PENDING_REVIEW
+        with pytest.raises(StaleDecisionError):  # the premature decision stays unusable
+            await b.approve(LOOKUP, revision=failed.observed_revision,
+                            expected_generation=failed.generation, actor="premature-operator")
+
+        env.restore_baseline()
+        recovered = await b.observe(LOOKUP)
+        assert recovered.observed_revision == baseline.observed_revision
+        assert recovered.state is TrustState.PENDING_REVIEW
+        await b.approve(LOOKUP, revision=recovered.observed_revision,
+                        expected_generation=recovered.generation, actor="test-operator")
+        assert not (await a.call_tool(LOOKUP, "lookup_document", ARGS)).isError
+    assert env.received_calls(LOOKUP) == 1
+
+
+async def test_recovery_requirement_survives_restart_and_repeated_failures(env):
+    """REQ-REV-02, REQ-TRU-04: the requirement is persisted, and a new failure re-arms it."""
+    duplicate = MALFORMED_METADATA["duplicate-tool-names"](env.fixture)
+    async with env.client() as client:
+        await observe_and_approve(client, LOOKUP)
+        env.serve_raw(duplicate)
+        with pytest.raises(ObservationError):
+            await client.observe(LOOKUP)
+    client.store.close()
+
+    async with env.client() as restarted:
+        record = restarted.store.get(LOOKUP)
+        assert record.observation_failed_at is not None
+        with pytest.raises(ObservationRequiredError):
+            await restarted.approve(LOOKUP, revision=record.observed_revision,
+                                    expected_generation=record.generation, actor="test-operator")
+        cli = subprocess.run(
+            [sys.executable, "-m", "mcp_trust_monitor", "--state-dir", str(env.state_dir),
+             "--fixture", str(FIXTURE_PATH), "approve", LOOKUP,
+             "--revision", record.observed_revision],
+            capture_output=True, text=True)
+        assert cli.returncode == 2
+        assert "observe it successfully" in cli.stderr
+
+        # Unchanged metadata counts as recovery evidence but does not restore approval.
+        env.restore_baseline()
+        recovered = await restarted.observe(LOOKUP)
+        assert recovered.observed_revision == record.observed_revision
+        assert recovered.observation_failed_at is None
+        assert recovered.state is TrustState.PENDING_REVIEW
+        with pytest.raises(CallBlocked):
+            await restarted.call_tool(LOOKUP, "lookup_document", ARGS)
+
+        # Another failure before approval re-arms the requirement.
+        env.serve_raw(duplicate)
+        with pytest.raises(ObservationError):
+            await restarted.observe(LOOKUP)
+        again = restarted.store.get(LOOKUP)
+        with pytest.raises(ObservationRequiredError):
+            await restarted.approve(LOOKUP, revision=again.observed_revision,
+                                    expected_generation=again.generation, actor="test-operator")
+
+        env.restore_baseline()
+        final = await restarted.observe(LOOKUP)
+        await restarted.approve(LOOKUP, revision=final.observed_revision,
+                                expected_generation=final.generation, actor="test-operator")
+        assert not (await restarted.call_tool(LOOKUP, "lookup_document", ARGS)).isError
+    assert env.received_calls(LOOKUP) == 1
 
 
 async def test_failed_reobservation_of_an_open_session_requires_fresh_validation(env):
