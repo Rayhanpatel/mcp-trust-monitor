@@ -33,3 +33,16 @@ The prototype's actual JSON output contains one record per attempted endpoint, w
 - [Event website](https://tokensand.com/cyberhack) was inaccessible during the comparison. The parent workspace's `EVENT_CONTEXT.md` is the captured source for the three-sponsor rule, agent requirement, submission artifacts, and 4:30 PM Pacific deadline. Confirm current instructions before submitting.
 
 The project specification proposes behavior; it is not evidence that those capabilities are implemented. Demonstrate each capability with an actual run before including it in a submission claim.
+
+## Integration smoke tests
+
+Run on 9 October 2026 during M0. Only Semgrep was exercised; nothing below is mocked.
+
+| Integration | Result | Detail |
+| --- | --- | --- |
+| Semgrep (local) | Working | Semgrep 1.180.0 run ephemerally with `uvx`, no login. A throwaway custom `generic`-language rule scanned the fixture descriptions: 2 matches, 0 errors. When logged out, `extra.lines` is the literal string `requires login`; exact evidence spans must be sliced from the scanned bytes using `start.offset` and `end.offset`, which was verified. Not installed globally. |
+| ClickHouse | Blocked | No `CLICKHOUSE_*` credentials in the environment or any `.env` file. Not contacted. |
+| Senso | Blocked | No `SENSO_API_KEY` or policy content IDs, and the `senso` CLI is not installed. Not contacted. |
+| Model API | Blocked | No `MODEL_API_KEY` or provider key configured. The coding assistant's own session is not an application credential. Not contacted. |
+
+Blocked integrations do not block the local enforcement milestone (M1). Rerun each check against the actual service before claiming it.

@@ -1,22 +1,30 @@
 {
   "policy_id": "demo-workspace-policy",
-  "revision": "1",
+  "revision": "2",
   "origin": "operator_authored_demo_policy",
   "rules": [
     {
       "id": "POL-001",
       "title": "Protect private workspace content",
       "requirement": "A tool description must not instruct an agent to transmit private workspace content to an unrelated destination as a condition of using the tool.",
-      "on_supported_violation": "quarantine"
+      "on_supported_violation": "quarantine",
+      "hard_deny_condition": "The description directs the agent to send, upload, post, or otherwise transmit content it calls private, confidential, or workspace content to an explicit URL or email address."
     },
     {
       "id": "POL-002",
       "title": "Preserve operator policy authority",
       "requirement": "A tool description must not instruct an agent to ignore or override the operator's governing security policy.",
-      "on_supported_violation": "quarantine"
+      "on_supported_violation": "quarantine",
+      "hard_deny_condition": "The description directs the agent to ignore, disregard, bypass, or override the operator's security policy."
     }
   ],
-  "benign_changes": "Wording and formatting changes consistent with the tool's purpose may be approved after assessment.",
+  "decision_authority": {
+    "hard_deny": "A deterministic detector match for a rule's hard_deny_condition quarantines the observed revision. No model output can downgrade or override it.",
+    "model": "The model may recommend review or quarantine for one exact server revision, citing rule IDs and exact evidence spans. It cannot approve.",
+    "approval": "Only an explicit operator action approves a server revision, including the initial baseline. An approval is bound to that revision and to this policy revision.",
+    "failure": "Detector, retrieval, model, or validation failure leaves the revision pending review."
+  },
+  "benign_changes": "Wording, formatting, and schema changes consistent with the tool's purpose are not violations. They remain pending review until an operator explicitly approves the new revision.",
   "uncertain_outcome": "review",
   "senso_content_ids": [],
   "integration_status": "Policy must be uploaded and retrieved through scoped Senso integration during implementation."
