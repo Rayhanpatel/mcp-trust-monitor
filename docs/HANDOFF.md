@@ -1,16 +1,29 @@
 # Handoff: M3, model review with scoped Senso policy and OpenAI
 
-Branch `feat/m3-review`, based on the approved M2 commit `d1811e9`, in the worktree `../mcp-trust-monitor-m2`. One M3 commit. Not merged or pushed. Stopped for independent review.
+Branch `feat/m3-review`, based on the approved M2 commit `d1811e9`, in the worktree `../mcp-trust-monitor-m2`. Two commits: M3 (`6d09258`) and the fix from its review. Not merged or pushed. Stopped for independent review.
 
 - `feat/m2-history-detection` stays at `d1811e9`. M2 details: `git show d1811e9:docs/HANDOFF.md`.
 - `../mtm-record` and any video materials were not touched.
+
+## Fix from the review of `6d09258`: every reported source must have contributed
+
+- **The gap.** `retrieve_policy` reported every *configured* content ID as retrieved, even one that returned nothing. With IDs A and B configured and the complete valid policy returned only from A, `RetrievedPolicy.content_ids` was `(A, B)`, so a model citing only B passed `validate_assessment`.
+- **Reproduced before fixing** with that sequence: the citation to B validated.
+- **Fix** (`senso.py`). After every passage has been validated, retrieval fails with `SensoError` if any configured ID contributed no validated passage. There is no wider search. The reported `content_ids` are therefore exactly the IDs that supplied validated text, and the policy-context binding (configured IDs) is unchanged.
+- **After the fix**, the same sequence is refused: "configured content IDs returned no validated passage: ['B']".
+- **Regression tests** in `tests/test_model_review.py`:
+  - A-only results with A and B configured fail retrieval after one request, with no fallback.
+  - End to end over real stdio transport, a model citing B is never even called. The model stage fails at `retrieval`, records no assessment or quarantine request, and leaves the state and generation unchanged; the call stays blocked.
+  - A control where A and B both contribute validated passages, so a citation to B is legitimate and validates.
+- **Results.** `uv run pytest tests/test_model_review.py`: 46 passed. That includes the existing single-ID retrieval, foreign-ID rejection, and policy-context staleness tests. The full suite was not rerun this round; the last full run, at `6d09258`, was 139 passed.
+- **Live `demo-m3`** (15:52 PDT): exit 0. The single configured ID contributed all 4 verified passages. `gpt-6-astra` recommended quarantine under POL-001, validation passed, and the quarantine was applied. `verified_blocked` was recorded with counts 1 → 1, and 18 events were read back from ClickHouse as 18 distinct IDs.
 
 ## What M3 does
 
 1. **Senso (REQ-SRC-01).**
    - `senso-upload` uploads only `policies/demo-policy.json`, exactly as stored, via `POST /org/kb/raw`. It waits for processing to finish, then writes the returned content ID to `SENSO_POLICY_CONTENT_IDS` in the ignored `.env`. The file is written through its symlink, other lines and permissions are kept, and no value is printed.
    - Retrieval calls `POST /org/search/context` with those `content_ids` and `require_scoped_ids: true`. The search is refused with no IDs, and there is no organization-wide fallback.
-   - Every passage must come from a configured ID and appear verbatim (whitespace-normalized) in the policy file. Together the passages must contain every rule ID and requirement. Otherwise retrieval fails.
+   - Every passage must come from a configured ID and appear verbatim (whitespace-normalized) in the policy file. Every configured ID must contribute at least one validated passage. Together the passages must contain every rule ID and requirement. Otherwise retrieval fails.
    - The content IDs, policy revision, and policy digest are kept with each assessment.
 2. **OpenAI (REQ-DEC-02, REQ-DEC-05).**
    - The official `openai` SDK (2.54.0) calls the Responses API with `MODEL_NAME`, default `gpt-6-astra`. It uses strict Structured Outputs: every field required, `additionalProperties: false`, recommendation enum `review|quarantine`, and policy-ID enum taken from the loaded policy.

@@ -141,8 +141,10 @@ def retrieve_policy(client: SensoClient, content_ids: Sequence[str], policy_path
     """Scoped retrieval, then verification that the passages are the intended policy.
 
     Every passage must come from a configured content ID and appear verbatim
-    (whitespace-normalized) in the local policy file, and together the passages
-    must contain every rule ID and requirement. Anything else raises SensoError.
+    (whitespace-normalized) in the local policy file; every configured content ID
+    must contribute at least one such passage; and together the passages must
+    contain every rule ID and requirement. Anything else raises SensoError, so the
+    returned `content_ids` are exactly the IDs that supplied validated text.
     """
     ids = tuple(dict.fromkeys(content_ids))
     report = client.search_context(query, ids)
@@ -162,6 +164,12 @@ def retrieve_policy(client: SensoClient, content_ids: Sequence[str], policy_path
         if _normalize(text) not in normalized_policy:
             raise SensoError("a retrieved passage does not match the operator policy file")
         passages.append((int(result.get("chunk_index") or 0), text))
+    # Every reported content ID must have contributed a validated passage; otherwise a
+    # model could cite an ID that returned nothing (REQ-DEC-03). No wider search.
+    contributing = {result["content_id"] for result in results}
+    silent = [content_id for content_id in ids if content_id not in contributing]
+    if silent:
+        raise SensoError(f"configured content IDs returned no validated passage: {silent}")
     joined = _normalize(" ".join(text for _, text in passages))
     for rule in document["rules"]:
         if rule["id"] not in joined or _normalize(rule["requirement"]) not in joined:

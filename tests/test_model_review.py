@@ -408,3 +408,50 @@ def test_evaluation_reports_misses_and_failures_honestly():
     _, failed = evaluate_cases(fixture, POLICY_PATH, retrieve=failing_retrieve,
                                assess=lambda *a: None)
     assert all(r.model == "failed: retrieval" for r in failed)
+
+
+# Source traceability across several content IDs (regression, review of 6d09258)
+
+def test_configured_id_without_a_validated_passage_fails_retrieval():
+    """A-only results with A and B configured must not report B as retrieved."""
+    client, http = senso({"results": [chunk(POLICY_TEXT, content_id="A")]})
+    with pytest.raises(SensoError, match=r"returned no validated passage: \['B'\]"):
+        retrieve_policy(client, ["A", "B"], POLICY_PATH)
+    assert len(http.requests) == 1  # no wider fallback search
+
+
+def test_every_contributing_id_is_reported_when_all_return_validated_passages():
+    client, _ = senso({"results": [chunk(POLICY_TEXT[:900], content_id="A"),
+                                   chunk(POLICY_TEXT[800:], content_id="B", index=1)]})
+    retrieved = retrieve_policy(client, ["A", "B"], POLICY_PATH)
+    assert retrieved.content_ids == ("A", "B")
+    ctx = context()
+    ctx = ReviewContext(**{**ctx.__dict__, "source_content_ids": retrieved.content_ids})
+    assert validate_assessment(raw(ctx, source_content_ids=["B"]), ctx).source_content_ids == (
+        "B",)  # B really supplied validated text, so citing it is traceable
+
+
+@pytest.mark.anyio
+async def test_citation_to_a_silent_content_id_cannot_authorize_quarantine(env):
+    client_http, http = senso({"results": [chunk(POLICY_TEXT, content_id="A")]})
+    assessed = []
+
+    def cite_b(ctx, prev, ret):
+        assessed.append(ctx)
+        return raw(ctx, source_content_ids=["B"])
+
+    async with env.client() as client:
+        await changed_to(env, client, "private-content-without-address")
+        before = client.store.get(LOOKUP)
+        report = await model_review(
+            client, LOOKUP, policy_path=POLICY_PATH,
+            **stage(cite_b, retrieve=lambda: retrieve_policy(client_http, ["A", "B"], POLICY_PATH),
+                    content_ids=("A", "B")))
+        assert report.outcome == "failed" and report.stage == "retrieval"
+        assert assessed == []  # the model is never asked without traceable sources
+        types = [e["event_type"] for e in client.store.events(LOOKUP)]
+        assert "model_assessment_recorded" not in types and "quarantine_requested" not in types
+        after = client.store.get(LOOKUP)
+        assert (after.state, after.generation) == (before.state, before.generation)
+        with pytest.raises(CallBlocked):
+            await client.call_tool(LOOKUP, "lookup_document", ARGS)
