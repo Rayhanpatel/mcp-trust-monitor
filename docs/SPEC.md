@@ -80,7 +80,10 @@ Use one Python service for orchestration and the managed client. Start with a se
 ### Observation and revisions
 
 - **REQ-REV-01 Revision digests.** A tool revision is the SHA-256 digest of canonical JSON (sorted keys, description text preserved exactly) containing the tool's name, description, and input schema. A server revision is the digest of its sorted `(tool name, tool revision)` pairs, so additions and removals are changes. Duplicate tool names make an observation invalid. Other MCP fields (title, annotations, output schema) are not yet covered.
-- **REQ-REV-02 Valid observations only.** Observation collects `tools/list` metadata only and never invokes `tools/call`. Complete pagination and validate responses before accepting an observation. A timeout, malformed response, or partial list is an observation error; it never yields a clean result or an approval, and it leaves no session eligible for dispatch until a later observation succeeds.
+- **REQ-REV-02 Valid observations only.** Observation collects `tools/list` metadata only and never invokes `tools/call`. Complete pagination and validate responses before accepting an observation. A connection or initialization failure, timeout, malformed response, or partial list is an observation failure, and it never yields a clean result or an approval.
+  - In one local transaction, an approved server moves to pending review and `observation_failed` is recorded. A quarantined server stays quarantined.
+  - Every session of that managed client then blocks, not only the one that failed, and the failing session is closed.
+  - Recovery requires a successful observation of valid metadata and explicit operator approval.
 - **REQ-REV-03 Capture metadata.** For each accepted observation, retain the UTC timestamp, logical server name, endpoint identity, version if available, transport, raw metadata, and origin (`live` or `synthetic_fixture`). Never persist authentication headers or credential-bearing URLs.
 
 A changed digest means changed metadata, not maliciousness.
@@ -95,7 +98,8 @@ Trust is scoped to `(managed client, server identity, server revision, policy re
 | Explicit operator approval of the current revision | Approved | Allowed |
 | Approved revision observed unchanged | Approved | Allowed |
 | Observed metadata or active policy changes | Pending review | Blocked |
-| Validated review recommendation, or a failure | Pending review | Blocked |
+| Observation failure (connection, initialization, or `tools/list`) | Pending review; quarantine preserved | Blocked |
+| Validated review recommendation, or an assessment failure | Pending review | Blocked |
 | Hard-deny match or validated quarantine recommendation | Quarantined | Blocked |
 | Operator quarantine | Quarantined | Blocked |
 | Explicit operator restore of a named revision | Approved | Allowed |
@@ -137,6 +141,16 @@ The applied outcome is the most restrictive of the deterministic result and the 
 
 The structured assessment contains a recommendation (`review` or `quarantine`), exact server revision and generation, policy IDs from the loaded policy, retrieved source content IDs, exact evidence spans, and a short explanation connecting the evidence to the policy.
 
+### Runtime model provider
+
+The application's assessment model is OpenAI `gpt-6-astra`, set by `MODEL_NAME` with `OPENAI_API_KEY`. M3 will call it with the official OpenAI Python SDK, through the Responses API, using strict Structured Outputs: a JSON schema with `strict: true`. Claude Code is the implementation tool only and is not part of the runtime.
+
+- **Approval is impossible.** The schema's `recommendation` enum is `review` | `quarantine`, so the model cannot even express an approval.
+- **Schema conformance is not validation.** Every response is still validated under REQ-DEC-03: exact evidence spans, loaded policy IDs, retrieved source IDs, and a matching revision and generation.
+- **Hard denials win.** Hard-deny precedence (REQ-DEC-01) is applied regardless of the model's output.
+
+No OpenAI dependency or integration code exists before M3.
+
 ### Evaluation
 
 - **REQ-EVAL-01 Fixed cases.** The scenarios in `fixtures/tool_changes.json` are fixed evaluation cases with expected outcomes derived from the policy text. Never edit a case or its expectation to match system output or to make the model outperform a rule; add new cases with new IDs.
@@ -164,7 +178,7 @@ Metrics are measured per run: metadata changes, assessments, quarantines, review
 | ClickHouse | Stores observation and decision history and serves the timeline |
 | Semgrep | Executes real custom hard-deny rules and contributes evidence spans |
 | Senso | Returns scoped operator policy used and cited in an assessment |
-| Model provider | Produces bounded, validated recommendations |
+| Model provider (OpenAI `gpt-6-astra`) | Produces bounded, validated recommendations through the Responses API with strict Structured Outputs |
 
 The workspace event notes require three sponsor tools, an autonomous agent taking action grounded in sources, an accessible repository, and a shareable demo video. Complete actual integrations before claiming compliance. Confirm the captured rules against the organizer's current instructions before submission.
 

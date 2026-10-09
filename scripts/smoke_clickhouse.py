@@ -4,7 +4,8 @@
 Reads CLICKHOUSE_* from the environment, falling back to the repository's .env.
 Every check compares the server's answer with an expected value; an unexpected
 answer counts as a failure exactly like an error. Output never contains
-credential values or the hostname: error text is sanitized before printing.
+credential values or the hostname: every raw result and error string is redacted
+in full before it is truncated or formatted, and each printed line is redacted again.
 Makes no persistent change; the write check uses a session-scoped temporary table.
 
 Run from the repository root: uv run python scripts/smoke_clickhouse.py
@@ -78,23 +79,27 @@ def sanitize(text: str, secrets: list[str]) -> str:
 
 def run_checks(client: Client, checks: list[Check], secrets: list[str],
                out: Callable[[str], None] = print) -> int:
+    def clean(raw: str, limit: int) -> str:
+        # Redact the complete raw string first; truncating first could leave a partial secret.
+        return sanitize(raw, secrets)[:limit]
+
     failures = 0
     for check in checks:
         started = time.perf_counter()
         try:
             result = client.query(check.sql, **check.params)
             if check.accept(result):
-                status = f"ok -> {result!r}" if result else "ok"
+                status = f"ok -> {clean(result, 80)!r}" if result else "ok"
             else:
                 failures += 1
-                status = f"UNEXPECTED result {result[:80]!r}; expected {check.expected}"
+                status = f"UNEXPECTED result {clean(result, 80)!r}; expected {check.expected}"
         except urllib.error.HTTPError as exc:
             failures += 1
-            body = exc.read().decode("utf-8", "replace").strip().splitlines()
+            body = sanitize(exc.read().decode("utf-8", "replace"), secrets).strip().splitlines()
             status = f"FAILED HTTP {exc.code}: {(body[0] if body else '')[:200]}"
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             failures += 1
-            status = f"FAILED {type(exc).__name__}: {str(exc)[:200]}"
+            status = f"FAILED {type(exc).__name__}: {clean(str(exc), 200)}"
         elapsed = (time.perf_counter() - started) * 1000
         out(sanitize(f"{check.label:38} {status}  ({elapsed:.0f} ms)", secrets))
     return failures

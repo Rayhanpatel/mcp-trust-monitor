@@ -23,11 +23,12 @@ smoke = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = smoke  # dataclasses resolve annotations through sys.modules
 _spec.loader.exec_module(smoke)
 
+# Synthetic values only; never real credentials.
 SETTINGS = {
-    "CLICKHOUSE_HOST": "abc123.us-west-2.aws.clickhouse.cloud",
+    "CLICKHOUSE_HOST": "h7qx2-k9zr.synthetic-ch.invalid",
     "CLICKHOUSE_PORT": "8443",
-    "CLICKHOUSE_USER": "smoke_user",
-    "CLICKHOUSE_PASSWORD": "s3cret-Pa55word",
+    "CLICKHOUSE_USER": "u5_smoke_vq",
+    "CLICKHOUSE_PASSWORD": "Zq9!Xv7#Lm2$Pw4%Tr8&",
     "CLICKHOUSE_DATABASE": "mcp_trust_monitor",
 }
 CORRECT = {
@@ -100,6 +101,39 @@ def test_errors_are_sanitized():
     for key in ("CLICKHOUSE_HOST", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD"):
         assert SETTINGS[key] not in output
     assert "<redacted>" in output
+
+
+def leaked_fragments(output: str, secret: str, size: int = 6) -> list[str]:
+    return [secret[i:i + size] for i in range(len(secret) - size + 1)
+            if secret[i:i + size] in output]
+
+
+def straddle(cutoff: int, secret: str, prefix_len: int = 0) -> str:
+    """Filler that places `secret` across the truncation `cutoff`, 8 characters before it."""
+    return "x" * (cutoff - 8 - prefix_len) + secret + " trailing text"
+
+
+@pytest.mark.parametrize("secret_key", ["CLICKHOUSE_PASSWORD", "CLICKHOUSE_HOST"])
+@pytest.mark.parametrize("where", ["unexpected-result", "http-error-body", "connection-error"])
+def test_secrets_crossing_truncation_boundaries_are_fully_redacted(where, secret_key):
+    """Redaction happens on complete strings before any truncation (80 or 200 chars)."""
+    secret = SETTINGS[secret_key]
+    if where == "unexpected-result":
+        overrides = {"SELECT 1": straddle(80, secret)}
+    elif where == "http-error-body":
+        body = straddle(200, secret).encode()
+        overrides = {"SELECT 1": urllib.error.HTTPError("https://example.invalid/", 500, "Error",
+                                                        {}, io.BytesIO(body))}
+    else:
+        prefix = "<urlopen error "  # str(URLError(reason)) wraps the reason
+        overrides = {"SELECT 1": urllib.error.URLError(straddle(200, secret, len(prefix)))}
+
+    status, output = run(overrides)
+    assert status == 1
+    assert leaked_fragments(output, secret) == []
+    # The secret starts 8 characters before the cutoff, so truncation now cuts the
+    # redaction marker ("<redacted>" -> "<redacte") instead of the secret.
+    assert "x<redacte" in output
 
 
 def test_missing_settings_block_without_contacting_anything():

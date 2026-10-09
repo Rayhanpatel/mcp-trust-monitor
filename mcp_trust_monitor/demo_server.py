@@ -93,6 +93,16 @@ def clear_definition(state_dir: Path) -> None:
     (server_dir(state_dir, MUTABLE_SERVER) / "definition.json").unlink(missing_ok=True)
 
 
+def set_startup_failure(state_dir: Path, server_id: str, enabled: bool) -> None:
+    """Make new processes of this server exit before MCP initialization (for tests)."""
+    marker = server_dir(state_dir, server_id) / "fail_startup"
+    if enabled:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    else:
+        marker.unlink(missing_ok=True)
+
+
 def received_requests(
     state_dir: Path, server_id: str, method: str | None = "tools/call"
 ) -> list[dict[str, Any]]:
@@ -184,6 +194,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--state-dir", required=True, type=Path)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     args = parser.parse_args(argv)
+    if (server_dir(args.state_dir, args.server) / "fail_startup").exists():
+        print(f"{args.server}: simulated startup failure", file=sys.stderr)
+        sys.exit(3)
     server = build_server(args.server, args.state_dir, load_fixture(args.fixture))
     anyio.run(_serve, server)
 

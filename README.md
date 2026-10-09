@@ -86,7 +86,13 @@ The saved research snapshot contains 35 server records and 287 tool definitions.
 
 ## Stack
 
-Python with the official MCP SDK for the managed client and demo servers, and SQLite for local trust state. Planned: ClickHouse for observation and decision history, local Semgrep for hard-deny detection, Senso for scoped policy retrieval, and a model for bounded recommendations.
+Python with the official MCP SDK for the managed client and demo servers, and SQLite for local trust state. Planned:
+- ClickHouse for observation and decision history.
+- Local Semgrep for hard-deny detection.
+- Senso for scoped policy retrieval.
+- OpenAI `gpt-6-astra` for bounded recommendations, called through the official OpenAI Python SDK and the Responses API with strict Structured Outputs. The model can recommend review or quarantine, never approval.
+
+Claude Code is used to build the project and is not part of the runtime.
 
 ## Troubleshooting
 

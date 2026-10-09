@@ -22,4 +22,5 @@ Do not restate the spec elsewhere. Reference requirement IDs in code docstrings,
 
 - Never print, log, or commit secrets. Report integrations as working only after an actual successful call; label fixture data `synthetic_fixture`.
 - The model may recommend review or quarantine but never approves and never overrides a deterministic hard denial.
+- The runtime model provider is OpenAI (`gpt-6-astra`, Responses API, strict Structured Outputs); see SPEC "Runtime model provider". Claude Code is the implementation tool, not a runtime dependency.
 - Run commands from the repository root: `uv sync`, `uv run pytest`, `uv run python -m mcp_trust_monitor --help`.

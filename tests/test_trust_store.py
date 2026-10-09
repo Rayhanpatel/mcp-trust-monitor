@@ -88,6 +88,27 @@ def test_duplicate_decisions_have_no_repeated_side_effects(store):
     assert len(store.events("s")) == events
 
 
+def test_observation_failure_invalidates_approval_and_preserves_quarantine(store):
+    """REQ-REV-02: one transaction moves approved to pending review and records the failure."""
+    approved = approve(store, store.record_observation("s", "rev-a", TOOLS_A))
+    failed = store.record_observation_failure("s", actor="test", error="boom")
+    assert failed.state is TrustState.PENDING_REVIEW
+    assert failed.generation == approved.generation + 1
+    assert failed.observed_revision == "rev-a"
+    event = store.events("s")[-1]
+    assert (event["event_type"], event["from_state"], event["to_state"]) == (
+        "observation_failed", "approved", "pending_review")
+    with pytest.raises(StaleDecisionError):  # decisions made before the failure are stale
+        approve(store, approved)
+
+    store.quarantine("s", actor="test", reason="test")
+    assert store.record_observation_failure("s", actor="test", error="boom").state is (
+        TrustState.QUARANTINED)
+
+    assert store.record_observation_failure("unknown", actor="test", error="boom") is None
+    assert store.events("unknown")[-1]["event_type"] == "observation_failed"
+
+
 def test_approval_records_policy_revision(store):
     """REQ-TRU-02: trust is scoped to the policy revision as well as the metadata revision."""
     record = approve(store, store.record_observation("s", "rev-a", TOOLS_A))

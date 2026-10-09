@@ -7,11 +7,15 @@ active policy (REQ-ENF-02). It checks once before connecting, so a blocked call
 never launches or contacts the server, and again immediately before dispatch.
 
 A session is eligible for dispatch only while its own most recent observation
-succeeded and recorded the revision the store currently holds. A failed or
-incomplete observation clears that eligibility, records `observation_failed`, and
-closes the session (REQ-REV-02). A session validated at an older revision is
-re-observed before dispatch, so a persisted approval cannot stand in for current
-metadata.
+succeeded and recorded the revision the store currently holds. A session validated
+at an older revision is re-observed before dispatch, so a persisted approval cannot
+stand in for current metadata.
+
+A connection, initialization, or tools/list failure atomically moves an approved
+server to pending review and records `observation_failed` (quarantine is
+preserved), then closes the failing session (REQ-REV-02). Because every session of
+this managed client authorizes against the same persisted record, they all block
+until valid metadata is observed and an operator approves again.
 
 `observe` is metadata-only (initialize and paginated tools/list). It records the
 server revision, which may invalidate an approval, and never dispatches a tool.
@@ -248,7 +252,11 @@ class ManagedClient:
         if connection is not None:
             await self._disconnect(server_id)
         connection = _Connection(self.servers[server_id], self._timeout)
-        await connection.open()
+        try:
+            await connection.open()
+        except Exception as exc:  # launch, transport, or initialization failure
+            self._record_observation_failure(server_id, exc)
+            raise
         self._connections[server_id] = connection
         return connection
 
@@ -272,12 +280,16 @@ class ManagedClient:
             record = self.store.record_observation(server_id, revision, tools)
         except Exception as exc:
             # A failed or incomplete observation never leaves a session eligible.
-            self.store.record_event(server_id, "observation_failed", actor="managed-client",
-                                    detail={"error": f"{type(exc).__name__}: {exc}"[:500]})
+            self._record_observation_failure(server_id, exc)
             await self._disconnect(server_id)
             raise
         connection.validated_revision = revision
         return record
+
+    def _record_observation_failure(self, server_id: str, exc: Exception) -> None:
+        """Invalidate approval for every session of this client (REQ-REV-02)."""
+        self.store.record_observation_failure(server_id, actor="managed-client",
+                                              error=f"{type(exc).__name__}: {exc}")
 
     async def _list_tools(self, server_id: str, connection: _Connection) -> list[dict[str, Any]]:
         if connection.session is None:

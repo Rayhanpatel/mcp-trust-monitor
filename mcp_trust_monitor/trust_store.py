@@ -232,6 +232,33 @@ class TrustStore:
                         current.observed_revision, detail={"reason": reason})
             return new
 
+    def record_observation_failure(
+        self, server_id: str, *, actor: str, error: str
+    ) -> TrustRecord | None:
+        """A connection, initialization, or tools/list failure (REQ-REV-02).
+
+        In one transaction: an approved server moves to pending review (bumping the
+        generation) and `observation_failed` is recorded. Quarantine and other states
+        are preserved. Every session of this managed client then blocks, because
+        they all authorize against this record.
+        """
+        detail = {"error": error[:500]}
+        with self._transaction():
+            current = self.get(server_id)
+            if current is None:
+                self._db.execute(
+                    "INSERT INTO trust_events (event_id, ts, client_id, server_id, event_type,"
+                    " actor, detail) VALUES (?, ?, ?, ?, 'observation_failed', ?, ?)",
+                    (str(uuid.uuid4()), _now(), self.client_id, server_id, actor,
+                     json.dumps(detail)))
+                return None
+            if current.state is TrustState.APPROVED:
+                self._update(current, state=TrustState.PENDING_REVIEW)
+            new = self._require(server_id)
+            self._event(new, "observation_failed", actor, current.state, new.state,
+                        current.observed_revision, detail=detail)
+            return new
+
     def invalidate(self, server_id: str, *, actor: str, reason: str) -> TrustRecord:
         """Move an approved server back to pending review."""
         with self._transaction():
