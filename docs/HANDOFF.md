@@ -1,11 +1,28 @@
 # Handoff: M2, observation history, hard-deny detection, ClickHouse delivery
 
-Branch `feat/m2-history-detection`, based on the approved M1 commit `9d3fb1f`, in the worktree `../mcp-trust-monitor-m2`. One M2 commit. Not merged or pushed. Stopped for independent review.
+Branch `feat/m2-history-detection`, based on the approved M1 commit `9d3fb1f`, in the worktree `../mcp-trust-monitor-m2`. Two commits: M2 (`a54affb`) and the fix from its review. Not merged or pushed. Stopped for independent review.
 
 - `feat/m1-enforcement` (`9d3fb1f`, the approved M1) and `feat/m2-local-detection` (`4271cc1`, the old WIP) are unchanged.
 - M1 details: `git show 9d3fb1f:docs/HANDOFF.md`.
 
 **Provenance of this work.** Another session (`cyber-hack-4f`) began M2 in this worktree and was stopped before committing. At the user's direction I took over and built on its uncommitted changes rather than starting over. I reviewed every inherited file and kept its rules (with the negation guard), detector, outbox schema, delivery client, and CLI. I then fixed the gaps listed under "Corrections to the inherited work". I selectively reused WIP code from `4271cc1`; nothing was merged.
+
+## Fix from the review of `a54affb`: strict verification evidence
+
+- **The bug.** `received_requests()` returns `[]` when the server's `received.jsonl` is missing. The demo's counter turned that into 0, so `verify_blocked` recorded success when *both* reads lacked evidence.
+- **Reproduced before fixing** with the review's sequence: approve, call, mutate, quarantine via `review_server`, delete the log, verify. The result was `verified=True`, counts 0/0, no problems.
+- **Fix.**
+  - `demo_server.received_call_count()` is a strict counter. A missing, unreadable, or malformed log (not JSON, not an object, no `method`, or a non-string `method`) raises `EvidenceUnavailable` instead of reading as 0.
+  - Demo servers now create their log at startup, so 0 means a started server that received no calls.
+  - `received_call_counter()` wraps it and is used by `demo-m2`, for verification and for every count it prints, and by the tests.
+  - `verify_blocked` records the reason the evidence was unavailable.
+  - The lenient `received_requests()` reader is kept for the M1 tests and the M1 `demo`.
+- **After the fix**, the same sequence records `verification_failed`, with counts `None`/`None` and the problems "server-side counter unavailable: EvidenceUnavailable: no request log…".
+- **Regression tests** (`tests/test_review.py`):
+  - evidence missing before verification;
+  - evidence disappearing between the before and after reads;
+  - the valid-zero control (quarantine with no prior call), which verifies with counts 0/0;
+  - strict-counter checks: a missing log, an empty but present log (0), a directory in place of the log, and four malformed-line forms.
 
 ## Decisions applied (user, superseding the saved plan)
 
@@ -47,7 +64,8 @@ Branch `feat/m2-history-detection`, based on the approved M1 commit `9d3fb1f`, i
 ## Changed files
 
 - New: `rules/hard_deny.yaml`, `mcp_trust_monitor/{detector,review,history}.py`, `tests/{test_detector,test_review,test_outbox_history}.py`.
-- Modified:
+- Evidence fix: `mcp_trust_monitor/{demo_server,review,__main__}.py`, `tests/test_review.py`, `docs/HANDOFF.md`.
+- Modified in `a54affb`:
   - `mcp_trust_monitor/{trust_store,managed_client,__main__,demo_server,policy}.py`;
   - `README.md`;
   - `docs/{SPEC,EVIDENCE,HANDOFF}.md` (SPEC: REQ-DEC-01 scan scope, the stale-assessment rule, the REQ-AUD-02 verification evidence).
@@ -56,9 +74,10 @@ Branch `feat/m2-history-detection`, based on the approved M1 commit `9d3fb1f`, i
 
 | Command | Result |
 | --- | --- |
-| `uv run pytest` | **88 passed** (the 58 M1 regression tests unchanged, plus 30 new) in 44 s, on `mcp` 1.30.0 |
+| `uv run pytest` | **96 passed** in 50 s, on `mcp` 1.30.0: the 58 M1 regression tests unchanged, 30 from `a54affb`, and 8 new evidence regressions (`a54affb` alone: 88) |
 | Real Semgrep probe (scratch) | Six fixed cases plus six false-positive and evasion probes: all as expected. WIP rules versus M2 rules on the two negated sentences: WIP matched both, M2 matched neither |
 | `uv run python scripts/smoke_clickhouse.py` (15:17 PDT) | 8 of 8 expected values, exit 0 (run to warm the service) |
+| `uv run python -m mcp_trust_monitor demo-m2`, rerun after the evidence fix at 15:25 PDT | **Exit 0** with the strict counter. Same outcome as the 15:17 run: `verified_blocked` with server counts 1 → 1, the control call succeeded, 17 events delivered (937 ms), and 20 raw rows read back as 17 distinct IDs (507 ms). |
 | `uv run python -m mcp_trust_monitor demo-m2` (15:17 PDT) | **Exit 0.** The approved baseline call succeeded (server count 1). The mutation was observed as `pending_review`. Real Semgrep found POL-001 and POL-002 with exact spans, and the server was quarantined in 1 attempt. The next call was blocked as `quarantined` with the server count still 1, and `verified_blocked` was recorded. The control call succeeded. From the observed change to the verified block took 1352 ms, including one Semgrep run. ClickHouse: 17 events delivered in 897 ms; 3 resent with the same IDs; read back as 20 raw rows and 17 distinct IDs in 525 ms. |
 
 **Reproduce:** run `uv sync`, put the ClickHouse values in `.env` (see `.env.example`), make sure `uv` is on `PATH`, then:
@@ -81,7 +100,7 @@ uv run python -m mcp_trust_monitor demo-m2
   - There is no poison-row isolation (D3): a row ClickHouse rejects would keep its batch pending and be retried.
   - The ClickHouse table is `trust_history`, a plain MergeTree; deduplication happens on read.
 - **WIP-format databases** from `4271cc1` are not migrated (D3).
-- **Verification reads only the demo server's own log** for the server-side count. Real third-party servers have no such counter, so verification against them would record `verification_failed` by design.
+- **Verification reads only the demo server's own log** for the server-side count, through the strict counter. Real third-party servers have no such counter, so verification against them would record `verification_failed` by design. The lenient `received_requests()` still reads a missing log as empty; use it only for display or tests, never as evidence.
 - **ClickHouse cold start.** The earlier first-request timeouts still have an unconfirmed cause. Warm the service before the demo.
 
 ## Remaining work

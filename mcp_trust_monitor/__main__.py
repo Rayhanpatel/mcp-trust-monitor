@@ -229,7 +229,14 @@ async def cmd_demo_m2(args: argparse.Namespace) -> int:
     failures: list[str] = []
 
     def received(server_id: str) -> int:
-        return len(demo.received_requests(state_dir, server_id))
+        # Strict evidence: a missing, unreadable, or malformed log raises, never reads as 0.
+        return demo.received_call_counter(state_dir, server_id)()
+
+    def shown(server_id: str) -> str:
+        try:
+            return str(received(server_id))
+        except demo.EvidenceUnavailable as exc:
+            return f"unavailable ({exc})"
 
     async def call(client: ManagedClient, server_id: str, tool: str, arguments: dict) -> bool:
         try:
@@ -239,7 +246,7 @@ async def cmd_demo_m2(args: argparse.Namespace) -> int:
         except CallBlocked as blocked:
             print(f"    call {server_id}/{tool}: BLOCKED before dispatch ({blocked.reason})")
             ok = False
-        print(f"    server-side received tools/call count for {server_id}: {received(server_id)}")
+        print(f"    server-side received tools/call count for {server_id}: {shown(server_id)}")
         return ok
 
     print(f"run id: {run_id}")
@@ -286,7 +293,7 @@ async def cmd_demo_m2(args: argparse.Namespace) -> int:
             print(f"FAILED: {', '.join(failures)}")
             return 1
         verification = await verify_blocked(client, lookup, "lookup_document", lookup_args,
-                                            lambda: received(lookup),
+                                            demo.received_call_counter(state_dir, lookup),
                                             quarantine=report.quarantine)
         elapsed_ms = (time.perf_counter() - started) * 1000
         print(f"    call {lookup}/lookup_document: BLOCKED before dispatch "

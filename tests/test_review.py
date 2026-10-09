@@ -10,6 +10,7 @@ import shutil
 
 import pytest
 
+from mcp_trust_monitor import demo_server as demo
 from mcp_trust_monitor.managed_client import CallBlocked, ObservationError
 from mcp_trust_monitor.review import review_server, verify_blocked
 from mcp_trust_monitor.trust_store import HardDenyOutcome, TrustState
@@ -19,6 +20,15 @@ from conftest import CONTROL, LOOKUP, POLICY_PATH, REPO_ROOT, observe_and_approv
 pytestmark = pytest.mark.anyio
 
 ARGS = {"title": "Annual report"}
+
+
+def strict_counter(env, server_id=LOOKUP):
+    """The evidence counter demo-m2 uses: raises instead of reading missing data as 0."""
+    return demo.received_call_counter(env.state_dir, server_id)
+
+
+def request_log(env, server_id=LOOKUP):
+    return demo.server_dir(env.state_dir, server_id) / "received.jsonl"
 
 
 def event_types(client, server_id=LOOKUP) -> list[str]:
@@ -55,8 +65,7 @@ async def test_hard_deny_quarantines_current_revision_and_block_is_verified(env)
         assert "verified_blocked" not in types  # not until there is evidence
 
         verification = await verify_blocked(client, LOOKUP, "lookup_document", ARGS,
-                                            lambda: env.received_calls(LOOKUP),
-                                            quarantine=quarantine)
+                                            strict_counter(env), quarantine=quarantine)
         assert verification["verified"] and verification["problems"] == []
         assert verification["blocked_reason"] == "quarantined"
         assert verification["received_before"] == verification["received_after"] == 1
@@ -179,3 +188,88 @@ async def test_verification_without_applied_quarantine_is_never_recorded_as_veri
         assert detail["blocked_reason"] == "pending_review"
         types = event_types(client)
         assert "verification_failed" in types and "verified_blocked" not in types
+
+
+async def quarantined_lookup(env, client, *, call_first: bool = True):
+    await observe_and_approve(client, LOOKUP)
+    if call_first:
+        assert not (await client.call_tool(LOOKUP, "lookup_document", ARGS)).isError
+    env.mutate("private-content-demand")
+    await client.observe(LOOKUP)
+    report = await review_server(client, LOOKUP, policy_path=POLICY_PATH)
+    assert report.outcome == "quarantined"
+    return report.quarantine
+
+
+def assert_failed_not_verified(client, detail):
+    assert detail["verified"] is False
+    assert any(p.startswith("server-side counter unavailable") for p in detail["problems"])
+    types = event_types(client)
+    assert "verification_failed" in types and "verified_blocked" not in types
+
+
+async def test_missing_evidence_before_verification_is_verification_failed(env):
+    """Regression (review of a54affb): a missing request log must never read as 0 calls."""
+    async with env.client() as client:
+        quarantine = await quarantined_lookup(env, client)
+        request_log(env).unlink()
+        detail = await verify_blocked(client, LOOKUP, "lookup_document", ARGS,
+                                      strict_counter(env), quarantine=quarantine)
+        assert detail["received_before"] is None and detail["received_after"] is None
+        assert detail["blocked_reason"] == "quarantined"  # the block itself still happened
+        assert_failed_not_verified(client, detail)
+
+
+async def test_evidence_disappearing_between_reads_is_verification_failed(env):
+    async with env.client() as client:
+        quarantine = await quarantined_lookup(env, client)
+        strict = strict_counter(env)
+
+        def read_then_lose_evidence():
+            value = strict()
+            if request_log(env).exists():
+                request_log(env).unlink()
+            return value
+
+        detail = await verify_blocked(client, LOOKUP, "lookup_document", ARGS,
+                                      read_then_lose_evidence, quarantine=quarantine)
+        assert detail["received_before"] == 1 and detail["received_after"] is None
+        assert_failed_not_verified(client, detail)
+
+
+async def test_valid_zero_evidence_still_verifies(env):
+    """Control: a started server that received no calls is a real zero, not missing."""
+    async with env.client() as client:
+        quarantine = await quarantined_lookup(env, client, call_first=False)
+        assert request_log(env).exists()
+        detail = await verify_blocked(client, LOOKUP, "lookup_document", ARGS,
+                                      strict_counter(env), quarantine=quarantine)
+        assert detail["verified"] and detail["problems"] == []
+        assert detail["received_before"] == detail["received_after"] == 0
+        assert "verified_blocked" in event_types(client)
+
+
+@pytest.mark.parametrize("content", ["not json\n", '["a list"]\n', '{"no_method": 1}\n',
+                                     '{"method": 7}\n'],
+                         ids=["not-json", "not-object", "no-method", "method-not-string"])
+def test_strict_counter_rejects_malformed_logs(tmp_path, content):
+    log = demo.server_dir(tmp_path, LOOKUP) / "received.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text('{"method": "tools/call"}\n' + content)
+    with pytest.raises(demo.EvidenceUnavailable):
+        demo.received_call_count(tmp_path, LOOKUP)
+
+
+def test_strict_counter_distinguishes_zero_from_missing_and_unreadable(tmp_path):
+    with pytest.raises(demo.EvidenceUnavailable):
+        demo.received_call_count(tmp_path, LOOKUP)  # missing
+    log = demo.server_dir(tmp_path, LOOKUP) / "received.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text("")
+    assert demo.received_call_count(tmp_path, LOOKUP) == 0  # present and empty: real zero
+    log.write_text('{"method": "tools/list"}\n{"method": "tools/call"}\n')
+    assert demo.received_call_count(tmp_path, LOOKUP) == 1
+    log.unlink()
+    log.mkdir()  # unreadable as a file
+    with pytest.raises(demo.EvidenceUnavailable):
+        demo.received_call_count(tmp_path, LOOKUP)

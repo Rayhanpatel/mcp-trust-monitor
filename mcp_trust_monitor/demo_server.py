@@ -21,7 +21,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import anyio
 import mcp.types as types
@@ -106,12 +106,54 @@ def set_startup_failure(state_dir: Path, server_id: str, enabled: bool) -> None:
 def received_requests(
     state_dir: Path, server_id: str, method: str | None = "tools/call"
 ) -> list[dict[str, Any]]:
-    """Requests the server process recorded receiving, optionally filtered by method."""
+    """Requests the server process recorded receiving, optionally filtered by method.
+
+    Convenience reader for tests and display: a missing log reads as no requests. Use
+    `received_call_count` wherever the count is evidence.
+    """
     log = server_dir(state_dir, server_id) / "received.jsonl"
     if not log.exists():
         return []
     entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
     return [entry for entry in entries if method is None or entry["method"] == method]
+
+
+class EvidenceUnavailable(Exception):
+    """The server-side request log is missing, unreadable, or malformed."""
+
+
+def received_call_count(state_dir: Path, server_id: str) -> int:
+    """Strict server-side `tools/call` count for verification evidence (REQ-AUD-02).
+
+    The server creates its log when it starts, so zero means a started server that
+    received no calls. A missing, unreadable, or malformed log raises
+    `EvidenceUnavailable` instead of reading as zero.
+    """
+    log = server_dir(state_dir, server_id) / "received.jsonl"
+    try:
+        text = log.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise EvidenceUnavailable(f"no request log for {server_id}") from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise EvidenceUnavailable(f"request log for {server_id} is unreadable: {exc!r}") from exc
+    count = 0
+    for number, line in enumerate(text.splitlines(), start=1):
+        try:
+            entry = json.loads(line)
+            method = entry["method"]
+        except (ValueError, TypeError, KeyError) as exc:
+            raise EvidenceUnavailable(
+                f"request log for {server_id} is malformed at line {number}") from exc
+        if not isinstance(method, str):
+            raise EvidenceUnavailable(
+                f"request log for {server_id} is malformed at line {number}")
+        count += method == "tools/call"
+    return count
+
+
+def received_call_counter(state_dir: Path, server_id: str) -> Callable[[], int]:
+    """The verification counter used by demo-m2: strict, never reads missing data as 0."""
+    return lambda: received_call_count(state_dir, server_id)
 
 
 def server_config(server_id: str, state_dir: Path, fixture_path: Path) -> ServerConfig:
@@ -138,6 +180,7 @@ def build_server(server_id: str, state_dir: Path, fixture: dict[str, Any]) -> Se
     server: Server = Server(server_id)
     log = server_dir(state_dir, server_id) / "received.jsonl"
     log.parent.mkdir(parents=True, exist_ok=True)
+    log.touch(exist_ok=True)  # a started server always has evidence, even of zero calls
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:

@@ -144,8 +144,9 @@ async def verify_blocked(
     def counter() -> int | None:
         try:
             value = received_count()
-        except Exception as exc:  # the evidence source itself failed
-            problems.append(f"server-side counter unavailable: {type(exc).__name__}")
+        except Exception as exc:  # missing, unreadable, or malformed evidence
+            problems.append(f"server-side counter unavailable: {type(exc).__name__}: "
+                            f"{str(exc)[:200]}")
             return None
         return value if isinstance(value, int) else None
 
