@@ -22,11 +22,12 @@ PROJECT = {"name": "mcp-trust-monitor", "version": VERSION, "requires-python": "
 SOURCE = {"mcp_trust_monitor/__init__.py": b'__version__ = "0.2.0a1"\n',
           "mcp_trust_monitor/library_cli.py": b"def main(): pass\n",
           "mcp_trust_monitor/py.typed": b"", "pyproject.toml": b"fixture\n",
+          "examples/installed_consumer.py": b"# Synthetic installed consumer\n",
           "README.md": b"Synthetic fixture\n", "LICENSE": b"MIT\n"}
 METADATA = b"Metadata-Version: 2.4\nName: mcp-trust-monitor\nVersion: 0.2.0a1\nRequires-Python: >=3.10\nRequires-Dist: mcp<1.31,>=1.30\n\nSynthetic fixture\n"
 
 
-def distributions(wheel_overrides=None, sdist_overrides=None, metadata=METADATA):
+def distributions(wheel_overrides=None, sdist_overrides=None, metadata=METADATA, omit_sdist=()):
     prefix = f"mcp_trust_monitor-{VERSION}.dist-info/"
     files = {name: data for name, data in SOURCE.items() if name.startswith("mcp_trust_monitor/")}
     files.update({prefix + "METADATA": metadata,
@@ -48,6 +49,8 @@ def distributions(wheel_overrides=None, sdist_overrides=None, metadata=METADATA)
             archive.writestr(name, content)
     files = dict(SOURCE, **{"PKG-INFO": metadata})
     files.update(sdist_overrides or {})
+    for name in omit_sdist:
+        del files[name]
     sdist = io.BytesIO()
     with tarfile.open(fileobj=sdist, mode="w:gz") as archive:
         for name, content in files.items():
@@ -119,6 +122,11 @@ class PublicationGateTests(unittest.TestCase):
         for change in ({"README.md": b"unreviewed\n"}, {"../outside": b"bad\n"}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 validate_distributions(distributions(sdist_overrides=change), SOURCE, PROJECT, VERSION)
+
+    def test_rejects_omitted_tracked_nonpackage_source(self):
+        with self.assertRaises(ValueError):
+            validate_distributions(distributions(omit_sdist=["examples/installed_consumer.py"]),
+                                   SOURCE, PROJECT, VERSION)
 
     def test_rejects_unreviewed_dependency_metadata_and_entry_points(self):
         bad_metadata = METADATA.replace(b"Requires-Dist: mcp<1.31,>=1.30", b"Requires-Dist: unreviewed-dependency")

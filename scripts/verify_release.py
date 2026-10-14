@@ -153,8 +153,8 @@ def validate_distributions(assets, source, project, version):
             sdist_files[name] = content
             if name != "PKG-INFO":
                 require(name in source and content == source[name], f"sdist source mismatch: {name}")
-    require(set(package) | {"pyproject.toml", "README.md", "LICENSE", "PKG-INFO"} <= set(sdist_files),
-            "sdist omits required source")
+    require(set(sdist_files) == set(source) | {"PKG-INFO"},
+            "sdist must contain every tracked source file and only generated PKG-INFO")
     require(sdist_files["PKG-INFO"] == wheel_metadata, "wheel and sdist metadata differ")
     return {"wheel_package_files": len(package), "sdist_source_files": len(sdist_files) - 1}
 
