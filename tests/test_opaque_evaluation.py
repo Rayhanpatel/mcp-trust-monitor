@@ -268,4 +268,3 @@ async def test_actual_provider_input_has_metadata_but_no_case_family_arm_or_tria
     assert '"expected_outcome"' not in text and '"expected_detector"' not in text
     assert '"memory": "on"' not in text and '"pair": 1' not in text
     assert "tools" not in request
-
