@@ -161,6 +161,103 @@ def test_api_errors_and_timeouts_raise_model_error():
     assert error.value.kind == "api_error"
 
 
+
+# Per-attempt response metadata (REQ-EVAL-02): never inherited from a previous response.
+
+class ScriptedResponses:
+    def __init__(self, *items):
+        self.items = list(items)
+
+    def create(self, **kwargs):
+        item = self.items.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def received(response_id, status="completed", output=(), incomplete=None):
+    return SimpleNamespace(id=response_id, model=f"model-{response_id}", status=status,
+                           output=list(output), incomplete_details=incomplete,
+                           usage=SimpleNamespace(input_tokens=3, output_tokens=2,
+                                                 total_tokens=5))
+
+
+def text_response(response_id, value):
+    return received(response_id, output=[message(SimpleNamespace(
+        type="output_text", text=value if isinstance(value, str) else json.dumps(value)))])
+
+
+def test_no_response_after_a_success_reports_null_metadata():
+    ctx = context()
+    assessor = assessor_with(ScriptedResponses(text_response("resp_1", raw(ctx)),
+                                               TimeoutError("timed out")))
+    assessor.assess(ctx, (), retrieved_policy())
+    assert assessor.response_metadata() == {
+        "response_id": "resp_1", "model": "model-resp_1",
+        "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}}
+    with pytest.raises(ModelError):
+        assessor.assess(ctx, (), retrieved_policy())
+    assert assessor.response_metadata() == {"response_id": None, "model": None, "usage": None}
+
+
+@pytest.mark.parametrize("failed", [
+    received("resp_2", output=[message(SimpleNamespace(type="refusal", refusal="no"))]),
+    received("resp_2", status="incomplete", incomplete=SimpleNamespace(reason="max_output_tokens")),
+    received("resp_2", status="failed"),
+    received("resp_2", output=[message(SimpleNamespace(type="output_text", text="{not json"))]),
+    received("resp_2", output=[message()]),
+], ids=["refusal", "incomplete", "failed-status", "malformed", "empty"])
+def test_a_received_unusable_response_keeps_its_own_metadata(failed):
+    ctx = context()
+    assessor = assessor_with(ScriptedResponses(text_response("resp_1", raw(ctx)), failed))
+    assessor.assess(ctx, (), retrieved_policy())
+    with pytest.raises(ModelError):
+        assessor.assess(ctx, (), retrieved_policy())
+    meta = assessor.response_metadata()
+    assert meta["response_id"] == "resp_2" and meta["model"] == "model-resp_2"
+    assert meta["usage"] == {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+
+
+def test_a_validation_rejected_response_keeps_its_own_metadata():
+    ctx = context()
+    assessor = assessor_with(ScriptedResponses(
+        text_response("resp_1", raw(ctx)),
+        text_response("resp_2", raw(ctx, revision="sha256:other"))))
+    assessor.assess(ctx, (), retrieved_policy())
+    rejected = assessor.assess(ctx, (), retrieved_policy())
+    with pytest.raises(AssessmentRejected):
+        validate_assessment(rejected, ctx)
+    assert assessor.response_metadata()["response_id"] == "resp_2"
+
+
+@pytest.mark.anyio
+async def test_model_review_does_not_inherit_a_previous_response_id(env):
+    """Real stdio transport; the OpenAI client is scripted."""
+
+    class Contextual(ScriptedResponses):
+        def create(self, **kwargs):
+            item = self.items.pop(0)
+            if isinstance(item, BaseException):
+                raise item
+            header = json.loads(kwargs["input"].split("\n<untrusted_tool_metadata>")[0])
+            return text_response(item, {
+                "recommendation": "review", "server_id": header["server_id"],
+                "revision": header["revision"], "generation": header["generation"],
+                "policy_ids": [], "source_content_ids": header["policy"]["content_ids"],
+                "evidence": [], "explanation": "No rule is violated."})
+
+    assessor = assessor_with(Contextual("resp_1", TimeoutError("timed out")))
+    async with env.client() as client:
+        await changed_to(env, client, "harmless-wording-change")
+        kwargs = dict(policy_path=POLICY_PATH, **stage(assessor.assess),
+                      response_id=lambda: assessor.last_response_id)
+        first = await model_review(client, LOOKUP, **kwargs)
+        assert first.outcome == "pending_review" and first.response_id == "resp_1"
+        second = await model_review(client, LOOKUP, **kwargs)
+        assert second.outcome == "failed" and second.stage == "model"
+        assert second.response_id is None
+        assert client.store.get(LOOKUP).state is TrustState.PENDING_REVIEW
+
 # Senso scoping and verification (mocked HTTP)
 
 class FakeHTTP:

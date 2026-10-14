@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from mcp_trust_monitor import demo_server as demo
+from mcp_trust_monitor.historical_demo import claim_demo_state
 from mcp_trust_monitor.managed_client import ManagedClient, trust_db_path
 from mcp_trust_monitor.policy import load_policy
 from mcp_trust_monitor.trust_store import TrustStore
@@ -26,12 +27,18 @@ def anyio_backend() -> str:
 
 @dataclass
 class DemoEnvironment:
-    """Isolated state directory with real stdio launch configs for both demo servers."""
+    """Isolated state directory with real stdio launch configs for both demo servers.
+
+    `client()` writes the store directly, outside any owner, as the historical demo
+    did, so it marks the directory as historical demo state first. Tests that open a
+    `TrustMonitor` on `state_dir` never call `client()` and keep it library state.
+    """
 
     state_dir: Path
     policy_path: Path = POLICY_PATH
 
     def client(self, policy_path: Path | None = None) -> ManagedClient:
+        claim_demo_state(self.state_dir)
         store = TrustStore(trust_db_path(self.state_dir))
         servers = {sid: demo.server_config(sid, self.state_dir, FIXTURE_PATH)
                    for sid in demo.DEMO_SERVERS}

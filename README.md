@@ -1,163 +1,124 @@
 # MCP Trust Monitor
 
-An agent that monitors changes to MCP tool definitions, evaluates them against an explicit policy, and quarantines affected connections in a managed client with evidence for each decision.
+A Python library that keeps MCP tool approval tied to the metadata an operator
+reviewed. When the monitor observes changed tool definitions, calls through
+the managed client stop until the new revision is reviewed and approved.
 
-**Status: milestone M3, model review with scoped policy.** A managed MCP client binds trust to exact metadata revisions and refuses calls before transport dispatch unless the current revision is explicitly approved. Two controlled local MCP servers exercise it over real stdio transport.
+**Version 0.2.0a1 is an alpha for local stdio servers.** It provides an owning async
+SDK, a CLI, background monitoring, a local operator console, and decision-record
+export. Optional Semgrep, OpenAI, Senso and ClickHouse adapters add policy checks,
+review recommendations, reviewed precedents and audit delivery. Memory is off by
+default.
 
-M2 adds:
-- an observation history with provenance;
-- deterministic hard-deny detection on tool *descriptions* with pinned Semgrep, which quarantines a still-current revision automatically;
-- a local outbox delivered to ClickHouse and read back with event-ID deduplication.
+## Install
 
-M3 adds:
-- scoped retrieval of the operator policy from Senso, verified against `policies/demo-policy.json`;
-- an OpenAI `gpt-6-astra` assessment with strict Structured Outputs that can only recommend `review` or `quarantine`;
-- deterministic validation of that assessment, with validated quarantines applied through the same guarded transition as hard denials.
-
-Polling and the timeline view are not implemented; the demos are scripted walkthroughs, not continuous monitoring. For judges, see the [submission summary](docs/SUBMISSION.md); for status and evidence, see [the handoff](docs/HANDOFF.md).
-
-## The product
-
-A tool trusted yesterday can advertise different instructions today. MCP Trust Monitor records that change, blocks the tool until the change is reviewed, determines whether it violates the operator's policy, and verifies that a quarantined connection can no longer receive calls through the managed client.
-
-The demos run against two controlled synthetic MCP servers. Protection applies only to calls made through this project's managed client.
-
-- **`demo-m3`:** a server rewrites its description to exfiltrate private notes, in a way the deterministic rules cannot catch. The model, reading the policy retrieved from Senso, recommends quarantine with exact evidence. The validated quarantine blocks the next call before dispatch, the server-side call count stays unchanged, the unaffected tool keeps working, and the history is read back from ClickHouse.
-- **`demo-m2`:** shows the same flow driven by a deterministic Semgrep hard-deny match, without Senso or OpenAI.
-
-A harmless wording change is never quarantined; it stays blocked in pending review until the operator approves it.
-
-## Read first
-
-- [Submission summary](docs/SUBMISSION.md): what it does, the four integrations, measured results, and limitations
-- [Product and technical specification](docs/SPEC.md): authoritative requirements with stable IDs
-- [Build plan and milestones](docs/BUILD_PLAN.md)
-- [Evidence provenance, claim limits, and integration status](docs/EVIDENCE.md)
-- [Latest milestone handoff](docs/HANDOFF.md)
-- [Example policy](policies/demo-policy.json)
-- [Fixed evaluation cases](fixtures/tool_changes.json)
-
-## Setup
-
-Requires [uv](https://docs.astral.sh/uv/) and Python 3.10 or newer (uv downloads 3.12 if needed). Run every command from the repository root.
+Use Python 3.10 or 3.12 on macOS or Linux. Download the wheel and `SHA256SUMS` from
+[the versioned GitHub release](https://github.com/Rayhanpatel/mcp-trust-monitor/releases/tag/v0.2.0a1),
+verify its checksum, and install into your application's environment:
 
 ```sh
-uv sync --python 3.12
-cp .env.example .env    # then fill in the values; .env is ignored by Git and never printed
+python3 -m venv .venv
+.venv/bin/python -m pip install ./mcp_trust_monitor-0.2.0a1-py3-none-any.whl
+.venv/bin/mcp-trust-monitor --help
 ```
 
-`demo` and the tests need no credentials. `demo-m2` needs the ClickHouse values, and `demo-m3` also needs the Senso and OpenAI values.
+The core library requires no cloud credentials. See the
+[library guide](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/LIBRARY.md)
+for configuration, CLI commands, optional adapters, ownership and recovery.
+Windows and remote MCP transports are outside this release.
 
-## Run
+## Try the enforcement boundary
 
-Scripted walkthrough of the enforcement boundary in a fresh temporary state directory. It launches both demo servers over stdio, approves the baselines, holds a harmless change in pending review, rejects a stale approval, quarantines the mutable server, and restarts the client:
+The [installed consumer example](https://github.com/Rayhanpatel/mcp-trust-monitor/tree/main/examples)
+runs an independently configured synthetic server outside the checkout. It:
+
+1. observes a tool and explicitly approves that revision;
+2. completes one protected call;
+3. changes the server's metadata;
+4. shows the next call blocked, with the server's instrumented call count unchanged.
+
+The example creates its own temporary policy and state. It needs no API key.
+Its scripted approval is for a controlled demonstration; a real application must
+present the exact revision and generation to its operator before approval.
+
+## Use the SDK
+
+```python
+from pathlib import Path
+from mcp_trust_monitor import MonitorConfig, ServerConfig, TrustMonitor
+
+config = MonitorConfig(
+    state_dir=Path("state"),
+    policy_path=Path("operator-policy.json"),
+    servers={"notes": ServerConfig(
+        "notes", "/absolute/path/to/python",
+        ("/absolute/path/to/notes_server.py",),
+        cwd="/absolute/path/to/server-directory",
+    )},
+)
+
+async def inspect():
+    async with TrustMonitor(config) as monitor:
+        observed = await monitor.observe("notes")
+        # Display the observed metadata, revision and generation to your operator.
+        # Call monitor.approve(...) only after that explicit decision.
+        return observed
+```
+
+The owning monitor coordinates sessions for one state directory. Protected calls
+check approval, current metadata, launch identity, policy and session freshness
+before dispatch. A changed definition, failed observation, quarantine or stale
+selection blocks dispatch. Calls are never replayed automatically after an
+uncertain outcome. See the
+[API and lifecycle contract](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/LIBRARY.md#public-api-and-lifecycle).
+
+## What protection means
+
+Only calls made through this library are covered. Observation starts the
+configured executable, so configure only processes you are prepared to run.
+The library does not sandbox code, verify package integrity, inspect returned
+document content, or guarantee that an approved tool behaves safely. An OpenAI
+review can recommend review or quarantine; it cannot approve a tool or override a
+deterministic hard denial.
+
+Decision-record exports are pseudonymous, not anonymous. Memory requires human
+verdicts, exact-content approval, verified private publication and current local
+eligibility. It is optional and has no authority to approve calls.
+
+## Verification and evidence
+
+The repaired runtime passed 570 tests on each of Python 3.10/3.12 across local
+macOS ARM64 and Linux ARM64, plus installed-wheel, typing and real filesystem-server
+checks. The [CI workflow](https://github.com/Rayhanpatel/mcp-trust-monitor/actions/workflows/ci.yml)
+checks the release source on hosted Linux AMD64 and macOS ARM64. Exact hosted
+results and artifact hashes belong to the release's verification record.
+
+The [release evidence](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/RELEASE_RESULT.md)
+distinguishes current runtime checks from older live service experiments. The
+historical eight-case memory comparison tied at 24/24 per mode; it did **not**
+demonstrate an improvement. Private lesson records, service identifiers and raw
+provider data are not included in the public release.
+
+## Develop
 
 ```sh
-uv run python -m mcp_trust_monitor demo
+uv sync --locked --python 3.12
+uv run pytest -q
+uv build
+uv run python scripts/check_distribution.py
+uv run python tests/typing/check.py
 ```
 
-M2 walkthrough: real Semgrep detects a hard-deny condition, the current revision is quarantined, the next call is verified blocked with the server-side count unchanged, the control still works, and the run's events are delivered to ClickHouse and read back with deduplication. It needs `uv` (Semgrep 1.180.0 runs in an isolated `uvx` environment; set `MCP_TRUST_SEMGREP` to override the command) and the ClickHouse values in `.env`:
+Tests use synthetic state and no cloud keys. Detector tests run pinned Semgrep
+1.180.0 in an isolated `uvx` environment. Node.js is required for the console's
+JavaScript tests; set `MTM_REQUIRE_NODE=1` to make its absence fail the suite.
 
-```sh
-uv run python -m mcp_trust_monitor demo-m2
-```
+Read the [specification](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/SPEC.md),
+[console guide](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/CONSOLE.md),
+and [handoff](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/HANDOFF.md)
+before changing the trust boundary. Historical scripted demos remain available as
+`python -m mcp_trust_monitor.historical_demo`; they use separate demo state and
+are not the generic library CLI.
 
-M3 walkthrough, which also needs `SENSO_API_KEY`, `SENSO_POLICY_CONTENT_IDS`, and `OPENAI_API_KEY` in `.env` (`MODEL_NAME` defaults to `gpt-6-astra`):
-
-```sh
-uv run python -m mcp_trust_monitor senso-upload   # once: uploads the policy, saves its content ID
-uv run python scripts/smoke_clickhouse.py         # warm ClickHouse first (idle services can time out)
-uv run python -m mcp_trust_monitor demo-m3        # Semgrep finds nothing; the model decides
-mkdir -p runtime && uv run python -m mcp_trust_monitor evaluate --json runtime/evaluation-m3.json
-```
-
-`demo-m3` and `evaluate` call Senso and OpenAI, and spend credits and tokens each run. Both exit nonzero if any required integration fails.
-
-`demo-m2` remains the fallback that needs only Semgrep and ClickHouse.
-
-Manual steps: `review <server> [--model]` runs one hard-deny review, plus the model stage with `--model`, and never approves, and `deliver` sends pending history events to ClickHouse; it exits nonzero while any remain pending.
-
-Manual operation. State persists in `runtime/state/` (ignored by Git):
-
-```sh
-uv run python -m mcp_trust_monitor observe demo/document-lookup   # record the current revision: unreviewed
-uv run python -m mcp_trust_monitor status                         # show revision and generation
-uv run python -m mcp_trust_monitor approve demo/document-lookup --revision <observed revision> --generation <generation>
-uv run python -m mcp_trust_monitor call demo/document-lookup lookup_document '{"title": "Annual report"}'
-uv run python -m mcp_trust_monitor received demo/document-lookup  # server-side received tools/call count
-uv run python -m mcp_trust_monitor quarantine demo/document-lookup --reason "manual test"
-uv run python -m mcp_trust_monitor call demo/document-lookup lookup_document '{"title": "Annual report"}'   # BLOCKED, exit 3
-uv run python -m mcp_trust_monitor mutate --scenario private-content-demand   # or: mutate --baseline
-uv run python -m mcp_trust_monitor approve demo/document-lookup --revision <revision> --restore           # lift quarantine explicitly
-```
-
-`call` exits 0 on success, 1 on a tool error, and 3 when blocked before dispatch. A refused decision, such as a stale or quarantined approval, exits 2. After a failed observation, the server stays in pending review, and `approve` (including `--restore`) is refused until `observe` succeeds again. Run `observe`, check `status`, then approve. To start over, delete `runtime/state/`; that is the only way to discard a quarantine without an explicit restore.
-
-## Test
-
-```sh
-uv run pytest
-```
-
-The enforcement tests in `tests/test_enforcement.py` launch the demo servers as real stdio MCP subprocesses and compare against each server's own received-request log. Trust-store and revision tests run in process.
-
-Integration smoke test. Copy `.env.example` to `.env` and fill in the ClickHouse values first. It prints check results only, never credentials, and makes no persistent change:
-
-```sh
-uv run python scripts/smoke_clickhouse.py
-```
-
-## What is here
-
-| Path | Purpose |
-| --- | --- |
-| `mcp_trust_monitor/managed_client.py` | Managed MCP client and its pre-dispatch trust gate |
-| `mcp_trust_monitor/trust_store.py` | Persistent, revision-bound trust state (SQLite) |
-| `mcp_trust_monitor/revision.py` | Canonical tool and server revision digests |
-| `mcp_trust_monitor/demo_server.py` | Controlled mutable server and unaffected control, with received-request logs |
-| `mcp_trust_monitor/__main__.py` | Command line and scripted demo |
-| `tests/` | Focused behavior tests |
-| `scripts/smoke_clickhouse.py` | ClickHouse Cloud connectivity and permission smoke test |
-| `rules/hard_deny.yaml` | Semgrep rules implementing the policy's hard-deny conditions on tool descriptions |
-| `mcp_trust_monitor/detector.py` | Pinned, isolated Semgrep runner returning policy IDs and exact evidence spans |
-| `mcp_trust_monitor/review.py` | Hard-deny review pass (apply only if current) and evidence-based block verification |
-| `mcp_trust_monitor/history.py` | Bounded ClickHouse delivery of the local outbox and deduplicated reads |
-| `mcp_trust_monitor/senso.py` | Scoped Senso policy upload and retrieval, verified against the policy file |
-| `mcp_trust_monitor/assessor.py` | OpenAI Responses API assessor (strict schema, no tools) and the validator |
-| `mcp_trust_monitor/model_review.py` | Model stage: retrieve, assess, validate, apply a guarded quarantine |
-| `mcp_trust_monitor/evaluate.py` | Fixed-case evaluation against policy-defined expectations |
-| `fixtures/tool_changes.json` | Synthetic baseline, control, and fixed evaluation cases |
-| `policies/demo-policy.json` | Operator-authored policy with hard-deny conditions and decision authority |
-| `tools/registry_probe_prototype.py` | Inherited metadata-discovery experiment; not a hardened collector |
-| `data/evidence_manifest.json` | Count and digest of the earlier research snapshot |
-| `.env.example` | Exact variable names for ClickHouse, Senso, and the model |
-
-The saved research snapshot contains 35 server records and 287 tool definitions. It is a sample, not a registry census or a malware dataset, and public registry ingestion is deferred. See the evidence notes for provenance.
-
-## Stack
-
-Python with the official MCP SDK for the managed client and demo servers, and SQLite for local trust state and the history outbox. Implemented in M2:
-- ClickHouse Cloud for observation and decision history, delivered from the local outbox.
-- Local Semgrep 1.180.0, pinned and run in an isolated `uvx` environment, for hard-deny detection on tool descriptions.
-
-- Senso for scoped policy retrieval: explicit content IDs with `require_scoped_ids`, and no organization-wide fallback.
-- OpenAI `gpt-6-astra` for bounded recommendations, called through the official OpenAI Python SDK and the Responses API with strict Structured Outputs. The model can recommend review or quarantine, never approval.
-
-Claude Code is used to build the project and is not part of the runtime.
-
-## Troubleshooting
-
-If `ModuleNotFoundError: No module named 'mcp_trust_monitor'` appears when you run from outside the repository root, run from the root instead. In iCloud-synced folders such as an iCloud Desktop, macOS marks the `.venv` files as hidden, and Python skips hidden `.pth` files, so the editable install is not importable from other directories.
-
-## Contribute and push
-
-Work on a feature branch and stop for review at each milestone; see [CLAUDE.md](CLAUDE.md).
-
-```sh
-git switch -c feat/<milestone>
-git add <changed-files>
-git commit -m "Describe the change"
-git push -u origin feat/<milestone>
-```
-
-Keep credentials, raw research snapshots, and machine-specific configuration out of Git. This project currently has no selected distribution license; choose one before inviting external code reuse.
+MIT licensed. Report bugs through
+[GitHub issues](https://github.com/Rayhanpatel/mcp-trust-monitor/issues).

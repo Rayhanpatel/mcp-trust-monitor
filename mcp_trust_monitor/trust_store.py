@@ -20,9 +20,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
+from contextlib import contextmanager
+from urllib.parse import quote
 
-from .revision import tool_metadata
+from .revision import tool_metadata, server_revision
 
 
 class TrustState(str, Enum):
@@ -34,6 +36,14 @@ class TrustState(str, Enum):
 
 class TrustError(Exception):
     """A requested transition is not permitted."""
+
+
+class StorageFaultError(TrustError):
+    """Authoritative storage is unusable; this owner must close before recovery."""
+
+
+class SchemaCompatibilityError(TrustError):
+    """A database was produced by an unsupported newer schema."""
 
 
 class StaleDecisionError(TrustError):
@@ -59,6 +69,8 @@ class TrustRecord:
     observation_failed_at: str | None = None
     # `live` or `synthetic_fixture`, from the last accepted observation (REQ-REV-03).
     origin: str | None = None
+    launch_identity: str | None = None
+    approved_launch_identity: str | None = None
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -125,6 +137,11 @@ CREATE TABLE IF NOT EXISTS outbox (
     last_error TEXT,
     delivered_at TEXT
 );
+CREATE TABLE IF NOT EXISTS policy_activations (
+    client_id TEXT PRIMARY KEY,
+    policy_binding TEXT NOT NULL,
+    activated_at TEXT NOT NULL
+);
 """
 
 # Columns added after M1. Stores created by M1 gain them on open; no row is rewritten,
@@ -135,7 +152,26 @@ _MIGRATIONS = (
     ("trust_events", "run_id", "TEXT"),
     ("trust_events", "origin", "TEXT"),
 )
-SCHEMA_VERSION = 2
+_MIGRATIONS += (("trust_records", "launch_identity", "TEXT"),
+                ("trust_records", "approved_launch_identity", "TEXT"))
+# Version 4 adds `policy_activations`, which carries authorization meaning (REQ-TRU-02/03):
+# it is created with the version stamp in one transaction, and binaries that only know
+# version 3 refuse an upgraded store instead of activating a policy without recording it.
+SCHEMA_VERSION = 4
+
+
+def inspect_schema(path: Path) -> int:
+    """Read only, before journal changes, migrations, or owner markers."""
+    if not Path(path).exists():
+        return 0
+    db = sqlite3.connect("file:" + quote(str(Path(path).resolve())) + "?mode=ro", uri=True)
+    try:
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise SchemaCompatibilityError(f"unsupported schema {version}; maximum {SCHEMA_VERSION}")
+        return version
+    finally:
+        db.close()
 
 
 def _now() -> str:
@@ -155,27 +191,201 @@ class HardDenyOutcome:
 
 class TrustStore:
     def __init__(
-        self, path: Path, client_id: str = "demo-client", *, run_id: str | None = None
+        self, path: Path, client_id: str = "demo-client", *, run_id: str | None = None,
+        strict_integrity: bool = False,
     ) -> None:
         self.path = Path(path)
         self.client_id = client_id
-        # Correlates this process's events and observations in the history store.
         self.run_id = run_id or f"run-{uuid.uuid4()}"
+        self.strict_integrity = strict_integrity
+        self.faulted = False
+        self.on_fault: Callable[[BaseException], None] | None = None
+        inspect_schema(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Autocommit mode; transitions open explicit IMMEDIATE transactions.
-        self._db = sqlite3.connect(self.path, isolation_level=None, timeout=10.0)
-        self._db.row_factory = sqlite3.Row
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA synchronous=FULL")
-        self._db.executescript(_SCHEMA)
-        # Re-check inside one IMMEDIATE transaction so concurrent openers cannot both add
-        # a column. Existing rows are never rewritten.
-        with self._transaction():
-            for table, column, declaration in _MIGRATIONS:
-                columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
-                if column not in columns:
-                    self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
-            self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        raw = sqlite3.connect(self.path, isolation_level=None, timeout=10.0)
+        raw.row_factory = sqlite3.Row
+        self._db = _GuardedConnection(raw, self)
+        try:
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA synchronous=FULL")
+            with self.atomic():
+                for statement in _SCHEMA.split(";"):
+                    if statement.strip():
+                        self._db.execute(statement)
+                for table, column, declaration in _MIGRATIONS:
+                    columns = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
+                    if column not in columns:
+                        self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+                self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        except BaseException:
+            raw.close()
+            raise
+
+    def check_health(self) -> None:
+        if self.faulted:
+            raise StorageFaultError("storage_faulted; close, repair storage, and reopen")
+
+    def _fault(self, exc: BaseException) -> None:
+        self.faulted = True
+        if self.on_fault is not None:
+            self.on_fault(exc)
+
+    @contextmanager
+    def atomic(self):
+        """Yield the shared connection; nested operations use atomic SAVEPOINTs."""
+        self.check_health()
+        nested = self._db.in_transaction
+        name = "s_" + uuid.uuid4().hex
+        self._db.execute(f"SAVEPOINT {name}" if nested else "BEGIN IMMEDIATE")
+        try:
+            yield self._db
+            self._db.execute(f"RELEASE SAVEPOINT {name}" if nested else "COMMIT")
+        except BaseException as exc:
+            if isinstance(exc, sqlite3.Error):
+                self._fault(exc)
+            # Roll back even after the health latch was set. Never commit a partial action.
+            raw = self._db.raw
+            try:
+                in_transaction = raw.in_transaction
+            except sqlite3.Error:
+                in_transaction = False
+            if in_transaction:
+                try:
+                    raw.execute(f"ROLLBACK TO SAVEPOINT {name}" if nested else "ROLLBACK")
+                    if nested:
+                        raw.execute(f"RELEASE SAVEPOINT {name}")
+                except sqlite3.Error:
+                    pass
+            raise
+
+    def emit_event_in_transaction(self, db, server_id, event_type, actor, detail) -> str:
+        if db is not self._db or not self._db.in_transaction:
+            raise TrustError("event requires this store's active transaction")
+        return self._insert_event(server_id=server_id or "@memory", event_type=event_type,
+                                  actor=actor, detail=detail)
+
+    def ensure_identity(self, server_id: str, identity: str) -> None:
+        with self.atomic():
+            current = self.get(server_id)
+            if current is not None and current.launch_identity != identity:
+                state = TrustState.PENDING_REVIEW if current.state is TrustState.APPROVED else current.state
+                self._update(current, state=state, launch_identity=identity,
+                             observation_failed_at=_now())
+                new = self._require(server_id)
+                self._event(new, "launch_identity_changed", "owner", current.state, new.state,
+                            new.observed_revision, detail={"launch_identity": identity})
+
+    def recover_owner(self) -> None:
+        """Unclean-owner recovery for the whole state directory (REQ-ENF-07).
+
+        The unclean marker belongs to the directory, not to a client ID, so every trust
+        record in this database is recovered, whichever client opens it next: approved
+        records move to pending review, quarantine is preserved, and every record needs
+        a successful observation and explicit approval again. A later clean shutdown
+        under any client ID therefore cannot discard another client's requirement.
+        """
+        with self.atomic():
+            rows = self._db.execute(
+                "SELECT * FROM trust_records ORDER BY client_id, server_id").fetchall()
+            for current in [self._decode_record(row) for row in rows]:
+                state = TrustState.PENDING_REVIEW if current.state is TrustState.APPROVED else current.state
+                self._update(current, state=state, observation_failed_at=_now())
+                new = self._require_scoped(current.client_id, current.server_id)
+                self._event(new, "owner_recovered", "owner", current.state, new.state,
+                            new.observed_revision, detail={"observation_required": True})
+
+    def invalidate_policy(self, policy_binding: str) -> None:
+        """Activate `policy_binding` for this client scope (REQ-TRU-02, REQ-TRU-03).
+
+        Approvals bound to another policy move to pending review. On a genuine policy
+        change, every other record's generation also advances, with its state unchanged
+        (quarantine stays quarantined) and a `decision_context_invalidated` event, so an
+        approve or restore input prepared before the change is stale whatever the
+        record's state. A genuine change is a binding different from the last binding
+        activated for this client scope, in this owner lifetime or an earlier one.
+        Reactivating the same binding, including the first activation on an owner
+        reopen with an unchanged policy, changes no record. A store that has records but
+        never recorded an activation (written before activations were recorded) cannot
+        show its previous policy, so its first activation counts as a change: fail closed.
+        """
+        with self.atomic():
+            records = self.records()
+            previous_binding = self._last_activated_binding()
+            changed = previous_binding != policy_binding and (
+                previous_binding is not None or bool(records))
+            for current in records:
+                if current.state is TrustState.APPROVED and current.approved_policy_revision != policy_binding:
+                    self.invalidate(current.server_id, actor="owner", reason="policy reloaded")
+                elif changed:
+                    # The state is unchanged; only decision inputs prepared before the
+                    # change become stale (their generation no longer matches).
+                    self._update(current)
+                    new = self._require(current.server_id)
+                    self._event(new, "decision_context_invalidated", "owner", current.state,
+                                new.state, new.observed_revision, policy_revision=policy_binding,
+                                detail={"reason": "policy_changed",
+                                        "previous_policy_binding": previous_binding,
+                                        "policy_binding": policy_binding})
+                if self._policy_marker(current.server_id) == policy_binding:
+                    continue
+                self._insert_event(server_id=current.server_id, event_type="policy_reloaded",
+                                   actor="owner", detail={"policy_binding": policy_binding})
+            self._db.execute(
+                "INSERT INTO policy_activations (client_id, policy_binding, activated_at)"
+                " VALUES (?, ?, ?) ON CONFLICT(client_id) DO UPDATE SET"
+                " policy_binding = excluded.policy_binding, activated_at = excluded.activated_at"
+                " WHERE policy_activations.policy_binding != excluded.policy_binding",
+                (self.client_id, policy_binding, _now()))
+
+    def _last_activated_binding(self) -> str | None:
+        """The binding last activated for this client scope, if it is known.
+
+        Stores written before activations were recorded fall back to the newest
+        per-server `policy_reloaded` marker: every activation marks every existing
+        record, so the newest marker is the last activation that had any record.
+        """
+        row = self._db.execute("SELECT policy_binding FROM policy_activations WHERE client_id = ?",
+                               (self.client_id,)).fetchone()
+        marker = self._policy_marker(None)
+        if row is not None and marker is not None and marker != row["policy_binding"]:
+            # Every activation that records a row also marks every record with the same
+            # binding, so a newer marker that disagrees can only come from a writer that did
+            # not record activations. Treat it as the last activation, so a change back to
+            # the row's binding still counts as genuine and stales prepared decisions.
+            return marker
+        if row is not None:
+            return row["policy_binding"]
+        return marker
+
+    def _policy_marker(self, server_id: str | None) -> str | None:
+        query = ("SELECT detail FROM trust_events WHERE client_id=? AND event_type='policy_reloaded'"
+                 " AND actor='owner'")
+        params: list[Any] = [self.client_id]
+        if server_id is not None:
+            query += " AND server_id=?"
+            params.append(server_id)
+        previous = self._db.execute(query + " ORDER BY seq DESC LIMIT 1", params).fetchone()
+        if previous is None:
+            return None
+        try:
+            binding = json.loads(previous["detail"]).get("policy_binding")
+        except (ValueError, TypeError, AttributeError) as exc:
+            self._fault(exc)
+            raise StorageFaultError("invalid authoritative policy activation event") from exc
+        return binding if isinstance(binding, str) else None
+
+    @classmethod
+    def open_readonly(cls, path: Path, client_id: str = "default"):
+        inspect_schema(path)
+        raw = sqlite3.connect("file:" + quote(str(Path(path).resolve())) + "?mode=ro", uri=True)
+        raw.row_factory = sqlite3.Row
+        result = cls.__new__(cls)
+        result.path, result.client_id = Path(path), client_id
+        result.run_id = "readonly"
+        result.strict_integrity = False
+        result.faulted, result.on_fault = False, None
+        result._db = _GuardedConnection(raw, result)
+        return result
 
     def close(self) -> None:
         self._db.close()
@@ -187,14 +397,30 @@ class TrustStore:
             "SELECT * FROM trust_records WHERE client_id = ? AND server_id = ?",
             (self.client_id, server_id),
         ).fetchone()
-        return _record(row) if row else None
+        return self._decode_record(row) if row else None
 
     def records(self) -> list[TrustRecord]:
         rows = self._db.execute(
             "SELECT * FROM trust_records WHERE client_id = ? ORDER BY server_id",
             (self.client_id,),
         ).fetchall()
-        return [_record(row) for row in rows]
+        return [self._decode_record(row) for row in rows]
+
+    def _decode_record(self, row):
+        try:
+            record = _record(row)
+            if not isinstance(record.generation, int) or record.generation < 1:
+                raise ValueError("invalid generation")
+            for tool in record.observed_tools:
+                if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                    raise ValueError("invalid stored tools")
+            if self.strict_integrity and record.observed_revision is not None:
+                if server_revision(record.observed_tools) != record.observed_revision:
+                    raise ValueError('stored metadata does not match observed revision')
+            return record
+        except (ValueError, TypeError, KeyError) as exc:
+            self._fault(exc)
+            raise StorageFaultError("invalid authoritative trust record") from exc
 
     def events(self, server_id: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM trust_events WHERE client_id = ?"
@@ -229,10 +455,10 @@ class TrustStore:
             if current is None:
                 self._db.execute(
                     "INSERT INTO trust_records (client_id, server_id, state, observed_revision,"
-                    " observed_tools, generation, updated_at, origin)"
-                    " VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
+                    " observed_tools, generation, updated_at, origin, launch_identity)"
+                    " VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
                     (self.client_id, server_id, TrustState.UNREVIEWED.value, revision,
-                     tools_json, _now(), origin),
+                     tools_json, _now(), origin, provenance.get("launch_identity")),
                 )
                 new = self._require(server_id)
                 self._event(new, "observed_new", actor, None, new.state, revision)
@@ -309,7 +535,8 @@ class TrustStore:
                     f"is now at generation {current.generation}"
                 )
             self._update(current, state=TrustState.APPROVED, approved_revision=revision,
-                         approved_policy_revision=policy_revision)
+                         approved_policy_revision=policy_revision,
+                         approved_launch_identity=current.launch_identity)
             new = self._require(server_id)
             event_type = "restored" if current.state is TrustState.QUARANTINED else "approved"
             self._event(new, event_type, actor, current.state, new.state, revision,
@@ -405,6 +632,7 @@ class TrustStore:
         active_policy_revision: str,
         detection: Mapping[str, Any],
         actor: str = "hard-deny-detector",
+        context_guard: Callable[[], str | None] | None = None,
     ) -> HardDenyOutcome:
         """Apply a deterministic hard-deny match (REQ-DEC-01), atomically and only if current.
 
@@ -427,7 +655,7 @@ class TrustStore:
             elif policy_revision != active_policy_revision:
                 stale = "active policy revision changed"
             else:
-                stale = None
+                stale = context_guard() if context_guard is not None else None
             if stale is not None:
                 state = current.state if current else None
                 self._insert_event(
@@ -456,6 +684,23 @@ class TrustStore:
                                           "quarantine_requested_event_id": requested})
             return HardDenyOutcome("applied", new, requested_event_id=requested,
                                    applied_event_id=applied)
+
+    def record_assessment_if_current(self, server_id: str, *, revision: str, generation: int,
+                                     policy_revision: str, active_policy_revision: str,
+                                     detail: Mapping[str, Any], actor: str = "model-reviewer",
+                                     context_guard: Callable[[], str | None] | None = None):
+        with self.atomic():
+            current = self.get(server_id)
+            stale = ("revision or generation changed" if current is None or
+                     current.observed_revision != revision or current.generation != generation
+                     else "policy changed" if policy_revision != active_policy_revision else None)
+            if stale is None and context_guard is not None:
+                stale = context_guard()
+            event_id = self._insert_event(
+                server_id=server_id, event_type="assessment_stale" if stale else ("hard_deny_scan_clean" if actor == "hard-deny-detector" else "model_assessment_recorded"),
+                actor=actor, revision=revision, generation=generation, policy_revision=policy_revision,
+                detail={**dict(detail), **({"reason": stale} if stale else {})})
+            return AssessmentOutcome("stale" if stale else "recorded", event_id, stale)
 
     # Outbox (REQ-AUD-01)
 
@@ -506,6 +751,12 @@ class TrustStore:
             (self.client_id, server_id, revision)).fetchone()
         return tuple(json.loads(row["reviewed_metadata"])) if row else None
 
+    def observation(self, observation_id: str) -> dict[str, Any] | None:
+        """One retained observation of this client scope, by ID."""
+        row = self._db.execute("SELECT * FROM observations WHERE client_id = ? AND observation_id = ?",
+                               (self.client_id, observation_id)).fetchone()
+        return dict(row) if row else None
+
     def observations(self, server_id: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM observations WHERE client_id = ?"
         params: list[Any] = [self.client_id]
@@ -516,14 +767,23 @@ class TrustStore:
 
     # Internals
 
-    def _transaction(self) -> "_Transaction":
-        return _Transaction(self._db)
+    def _transaction(self):
+        return self.atomic()
 
     def _require(self, server_id: str) -> TrustRecord:
         record = self.get(server_id)
         if record is None:
             raise TrustError(f"no trust record for {server_id}")
         return record
+
+    def _require_scoped(self, client_id: str, server_id: str) -> TrustRecord:
+        """A record of any client scope in this database (directory-wide recovery)."""
+        row = self._db.execute(
+            "SELECT * FROM trust_records WHERE client_id = ? AND server_id = ?",
+            (client_id, server_id)).fetchone()
+        if row is None:
+            raise TrustError(f"no trust record for {client_id}/{server_id}")
+        return self._decode_record(row)
 
     def _update(self, current: TrustRecord, **changes: Any) -> None:
         values = {
@@ -534,18 +794,21 @@ class TrustStore:
             "approved_policy_revision": current.approved_policy_revision,
             "observation_failed_at": current.observation_failed_at,
             "origin": current.origin,
+            "launch_identity": current.launch_identity,
+            "approved_launch_identity": current.approved_launch_identity,
         }
         for key, value in changes.items():
             values[key] = value.value if isinstance(value, TrustState) else value
         cursor = self._db.execute(
             "UPDATE trust_records SET state = ?, observed_revision = ?, observed_tools = ?,"
             " approved_revision = ?, approved_policy_revision = ?, observation_failed_at = ?,"
-            " origin = ?, generation = ?, updated_at = ? WHERE client_id = ? AND server_id = ?"
+            " origin = ?, launch_identity = ?, approved_launch_identity = ?, generation = ?, updated_at = ? WHERE client_id = ? AND server_id = ?"
             " AND generation = ?",
             (values["state"], values["observed_revision"], values["observed_tools"],
              values["approved_revision"], values["approved_policy_revision"],
-             values["observation_failed_at"], values["origin"], current.generation + 1, _now(),
-             self.client_id, current.server_id, current.generation),
+             values["observation_failed_at"], values["origin"], values["launch_identity"],
+             values["approved_launch_identity"], current.generation + 1, _now(),
+             current.client_id, current.server_id, current.generation),
         )
         if cursor.rowcount != 1:
             raise StaleDecisionError(f"{current.server_id} changed during the transition")
@@ -567,19 +830,20 @@ class TrustStore:
             from_state=from_state.value if from_state else None,
             to_state=to_state.value if to_state else None, revision=revision,
             policy_revision=policy_revision, generation=record.generation,
-            origin=record.origin, detail=detail or {},
+            origin=record.origin, detail=detail or {}, client_id=record.client_id,
         )
 
     def _insert_event(self, *, server_id: str, event_type: str, actor: str,
                       from_state: str | None = None, to_state: str | None = None,
                       revision: str | None = None, policy_revision: str | None = None,
                       generation: int | None = None, origin: str | None = None,
-                      detail: Mapping[str, Any]) -> str:
+                      detail: Mapping[str, Any], client_id: str | None = None) -> str:
         """Insert one audit event and its outbox row; return the stable event ID.
-        The caller holds the transaction."""
+        The caller holds the transaction. Events belong to the record's client scope."""
         row = {
             "event_id": str(uuid.uuid4()), "run_id": self.run_id, "ts": _now(),
-            "client_id": self.client_id, "server_id": server_id, "event_type": event_type,
+            "client_id": client_id or self.client_id, "server_id": server_id,
+            "event_type": event_type,
             "actor": actor, "from_state": from_state, "to_state": to_state,
             "revision": revision, "policy_revision": policy_revision,
             "generation": generation, "origin": origin,
@@ -662,6 +926,83 @@ def _record(row: sqlite3.Row) -> TrustRecord:
         approved_policy_revision=row["approved_policy_revision"],
         generation=row["generation"],
         updated_at=row["updated_at"],
-        observation_failed_at=row["observation_failed_at"],
-        origin=row["origin"],
+        observation_failed_at=row["observation_failed_at"] if "observation_failed_at" in row.keys() else None,
+        origin=row["origin"] if "origin" in row.keys() else None,
+        launch_identity=row["launch_identity"] if "launch_identity" in row.keys() else None,
+        approved_launch_identity=row["approved_launch_identity"] if "approved_launch_identity" in row.keys() else None,
     )
+
+
+@dataclass(frozen=True)
+class AssessmentOutcome:
+    status: str
+    event_id: str
+    reason: str | None = None
+
+
+class _GuardedConnection:
+    """Latch SQL failures for all paths, including additive registries and reads."""
+    def __init__(self, raw, owner):
+        self.raw, self.owner = raw, owner
+
+    def __getattr__(self, name):
+        if name != 'close':
+            self.owner.check_health()
+        try:
+            return getattr(self.raw, name)
+        except sqlite3.Error as exc:
+            self.owner._fault(exc)
+            raise StorageFaultError('authoritative connection failed') from exc
+
+    def execute(self, *args, **kwargs):
+        return self._run("execute", *args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        return self._run("executemany", *args, **kwargs)
+
+    def executescript(self, script):
+        raise TrustError("executescript implicitly commits; execute each statement inside atomic()")
+
+    def _run(self, method, *args, **kwargs):
+        self.owner.check_health()
+        try:
+            return _GuardedCursor(getattr(self.raw, method)(*args, **kwargs), self.owner)
+        except sqlite3.Error as exc:
+            self.owner._fault(exc)
+            raise StorageFaultError("authoritative storage operation failed; action uncommitted") from exc
+
+
+class _GuardedCursor:
+    def __init__(self, cursor, owner):
+        self.cursor, self.owner = cursor, owner
+
+    def __getattr__(self, name):
+        return getattr(self.cursor, name)
+
+    def _fetch(self, method, *args):
+        self.owner.check_health()
+        try:
+            return getattr(self.cursor, method)(*args)
+        except sqlite3.Error as exc:
+            self.owner._fault(exc)
+            raise StorageFaultError('authoritative read failed') from exc
+
+    def fetchone(self):
+        return self._fetch('fetchone')
+
+    def fetchall(self):
+        return self._fetch('fetchall')
+
+    def fetchmany(self, *args):
+        return self._fetch('fetchmany', *args)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.owner.check_health()
+        try:
+            return next(self.cursor)
+        except sqlite3.Error as exc:
+            self.owner._fault(exc)
+            raise StorageFaultError('authoritative read failed') from exc

@@ -1,0 +1,83 @@
+name: Publish reviewed release to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Immutable GitHub release tag (for example v0.2.0a1)'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    if: github.repository == 'Rayhanpatel/mcp-trust-monitor' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.distributions.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.13.1'
+          python-version: '3.12.15'
+          enable-cache: false
+      - name: Validate immutable release, exact-commit CI, hashes and source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          UV_NO_ENV_FILE: 'true'
+        run: uv run --no-project --with packaging==26.3 python scripts/verify_release.py --output verified --report validation/report.json
+      - name: Retain release verification
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-verification
+          path: validation/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Transfer only verified distributions
+        id: distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-pypi-distributions
+          path: verified/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-trust-monitor/
+    permissions:
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact-id }}
+          merge-multiple: true
+          path: dist
+      # No checkout, package install, build, or project code execution in this job.
+      - name: Publish exact reviewed files with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          skip-existing: false
+          verify-metadata: true
+          attestations: true

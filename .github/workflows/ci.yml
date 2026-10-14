@@ -1,0 +1,98 @@
+name: library
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: library-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: test / ${{ matrix.os }} / Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python: ['3.10.22', '3.12.15']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      MTM_REQUIRE_NODE: '1'
+      SEMGREP_SEND_METRICS: 'off'
+      SEMGREP_ENABLE_VERSION_CHECK: '0'
+      UV_NO_ENV_FILE: 'true'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: '0.13.1'
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      - name: Install locked dependencies and record platform
+        env:
+          EXPECTED_ARCH: ${{ matrix.os == 'ubuntu-24.04' && 'x86_64' || 'arm64' }}
+        run: |
+          REPORTS="$RUNNER_TEMP/reports"
+          CLEAN_SOURCE="$RUNNER_TEMP/clean-source"
+          printf 'REPORTS=%s\nCLEAN_SOURCE=%s\n' "$REPORTS" "$CLEAN_SOURCE" >> "$GITHUB_ENV"
+          mkdir -p "$REPORTS" "$CLEAN_SOURCE"
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          uv sync --locked 2>&1 | tee "$REPORTS/sync.log"
+          uv run --locked python -c 'import json, platform, sys; print(json.dumps({"python": sys.version, "platform": platform.platform(), "machine": platform.machine()}))' > "$REPORTS/platform.json"
+          git rev-parse HEAD > "$REPORTS/source-commit.txt"
+          uv --version > "$REPORTS/uv.txt"
+          node --version > "$REPORTS/node.txt"
+          uv export --locked --no-hashes --no-emit-project > "$REPORTS/constraints.txt"
+          cat scripts/ci-constraints.txt >> "$REPORTS/constraints.txt"
+      - name: Prewarm pinned Semgrep
+        run: |
+          uvx --from semgrep==1.180.0 semgrep --version 2>&1 | tee "$REPORTS/semgrep.log"
+      - name: Run the complete credentialless suite
+        env:
+          UV_OFFLINE: 'true'
+        run: |
+          uv run --locked pytest -q --junitxml="$REPORTS/pytest.xml" -o cache_dir="$RUNNER_TEMP/pytest-cache" 2>&1 | tee "$REPORTS/pytest.log"
+      - name: Test release validation refusals
+        run: |
+          uv run --locked python scripts/check_release_validation.py 2>&1 | tee "$REPORTS/release-validation-tests.log"
+      - name: Build only archived tracked source
+        env:
+          UV_BUILD_CONSTRAINT: ${{ runner.temp }}/reports/constraints.txt
+        run: |
+          git archive HEAD | tar -x -C "$CLEAN_SOURCE"
+          cd "$CLEAN_SOURCE"
+          uv build 2>&1 | tee "$REPORTS/build.log"
+          uv run --no-project --python "$UV_PYTHON" python -c 'import hashlib, pathlib; d=pathlib.Path("dist"); print("".join(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in sorted(d.iterdir()) if p.name.endswith((".whl", ".tar.gz"))), end="")' > "$CLEAN_SOURCE/dist/SHA256SUMS"
+      - name: Verify the wheel outside the checkout and public typing
+        env:
+          UV_BUILD_CONSTRAINT: ${{ runner.temp }}/reports/constraints.txt
+        run: |
+          # Semgrep resolves in its own uvx environment, with its own MCP version.
+          uv run --locked python "$CLEAN_SOURCE/scripts/check_distribution.py" 2>&1 | tee "$REPORTS/distribution.log"
+          UV_CONSTRAINT="$GITHUB_WORKSPACE/scripts/ci-constraints.txt" uv run --locked python "$CLEAN_SOURCE/tests/typing/check.py" 2>&1 | tee "$REPORTS/typing.log"
+      - name: Retain reports and candidate distributions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: library-${{ matrix.os }}-python-${{ matrix.python }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/reports/
+            ${{ runner.temp }}/clean-source/dist/
+          if-no-files-found: error
+          retention-days: 30

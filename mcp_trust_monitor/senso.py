@@ -12,6 +12,7 @@ fallback. Timeouts and retries are bounded, and the API key is never printed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -42,7 +43,8 @@ class SensoClient:
     def __init__(self, api_key: str, *, base_url: str = BASE_URL, timeout_seconds: float = 20.0,
                  attempts: int = 3, backoff_seconds: float = 1.0,
                  opener: Callable[..., Any] = urllib.request.urlopen,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 async_transport: Any = None) -> None:
         if not api_key:
             raise SensoError("SENSO_API_KEY is not set")
         self._key = api_key
@@ -52,6 +54,53 @@ class SensoClient:
         self.backoff = backoff_seconds
         self._open = opener
         self._sleep = sleep
+        self._async_transport = async_transport
+
+    async def request_async(self, method: str, path: str, body: Mapping[str, Any] | None = None,
+                            *, retry: bool = True) -> dict[str, Any]:
+        """Cancellation-aware service I/O for the continuously running library."""
+        import httpx
+        headers = {"X-API-Key": self._key, "Accept": "application/json",
+                   "X-Senso-Signals": "off", "User-Agent": USER_AGENT}
+        attempts = self.attempts if retry else 1
+        last = "no attempt made"
+        async with httpx.AsyncClient(timeout=self.timeout, headers=headers,
+                                     transport=self._async_transport) as client:
+            for attempt in range(attempts):
+                try:
+                    response = await client.request(method, self.base_url + path, json=body)
+                    if response.is_error:
+                        last = f"HTTP {response.status_code} on {method} {path}: " + _redact(response.text, self._key)[:300]
+                        if response.status_code not in (429, 500, 502, 503, 504):
+                            raise SensoError(last)
+                    else:
+                        result = response.json() if response.content else {}
+                        if not isinstance(result, dict):
+                            raise SensoError("Senso response must be a JSON object")
+                        return result
+                except (httpx.HTTPError, ValueError) as exc:
+                    last = _redact(f"{type(exc).__name__} on {method} {path}: {exc}", self._key)[:300]
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(self.backoff * 2 ** attempt)
+        raise SensoError(last)
+
+    async def upload_raw_async(self, text: str, title: str) -> dict[str, Any]:
+        return await self.request_async("POST", "/org/kb/raw", {"text": text, "title": title}, retry=False)
+
+    async def node_async(self, kb_node_id: str) -> dict[str, Any]:
+        return await self.request_async("GET", f"/org/kb/nodes/{kb_node_id}")
+
+    async def node_content_async(self, kb_node_id: str, version: int | None = None) -> dict[str, Any]:
+        query = "" if version is None else f"?version={int(version)}"
+        return await self.request_async("GET", f"/org/kb/nodes/{kb_node_id}/content{query}")
+
+    async def search_context_async(self, query: str, content_ids: Sequence[str],
+                                   max_results: int = 20) -> dict[str, Any]:
+        if not content_ids:
+            raise SensoError("refusing an unscoped Senso search")
+        return await self.request_async("POST", "/org/search/context", {
+            "query": query, "content_ids": list(content_ids), "require_scoped_ids": True,
+            "max_results": max_results})
 
     def request(self, method: str, path: str, body: Mapping[str, Any] | None = None,
                 *, retry: bool = True) -> dict[str, Any]:
@@ -90,6 +139,12 @@ class SensoClient:
 
     def node(self, kb_node_id: str) -> dict[str, Any]:
         return self.request("GET", f"/org/kb/nodes/{kb_node_id}")
+
+    def node_content(self, kb_node_id: str, version: int | None = None) -> dict[str, Any]:
+        """Read-only: a document's body text and version number (`GET
+        /org/kb/nodes/{id}/content`, optionally `?version=<n>` for an earlier version)."""
+        query = "" if version is None else f"?version={int(version)}"
+        return self.request("GET", f"/org/kb/nodes/{kb_node_id}/content{query}")
 
     def search_context(self, query: str, content_ids: Sequence[str],
                        max_results: int = 20) -> dict[str, Any]:
@@ -148,6 +203,24 @@ def retrieve_policy(client: SensoClient, content_ids: Sequence[str], policy_path
     """
     ids = tuple(dict.fromkeys(content_ids))
     report = client.search_context(query, ids)
+    return _verified_policy_report(report, ids, policy_path)
+
+
+async def retrieve_policy_async(client: SensoClient, content_ids: Sequence[str], policy_path: Path,
+                                 *, query: str) -> RetrievedPolicy:
+    ids = tuple(dict.fromkeys(content_ids))
+    if not ids:
+        raise SensoError("policy retrieval requires scoped IDs")
+    if hasattr(client, "search_context_async"):
+        report = await client.search_context_async(query, ids)
+    else:
+        # Explicit injected synchronous test/custom adapters retain their own cancellation contract.
+        report = await asyncio.to_thread(client.search_context, query, ids)
+    return _verified_policy_report(report, ids, policy_path)
+
+
+def _verified_policy_report(report: Mapping[str, Any], ids: tuple[str, ...],
+                            policy_path: Path) -> RetrievedPolicy:
     results = report.get("results")
     if not isinstance(results, list) or not results:
         raise SensoError("scoped Senso search returned no passages")

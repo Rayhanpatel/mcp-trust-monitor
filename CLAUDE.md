@@ -1,26 +1,49 @@
-# CLAUDE.md
+# Contributor instructions
 
 ## Authoritative sources
 
-- `docs/SPEC.md`: the requirements, with stable `REQ-…` IDs. It wins over every other document.
-- `docs/BUILD_PLAN.md`: milestone order, exit conditions, and cut order.
-- `docs/EVIDENCE.md`: data provenance, claim limits, and integration status.
-- `docs/HANDOFF.md`: what the latest milestone completed and what remains.
-- `policies/demo-policy.json` and `fixtures/tool_changes.json`: the operator policy and the fixed evaluation cases.
+- `docs/SPEC.md`: requirements with stable `REQ-…` IDs; authoritative on behavior.
+- `docs/LIBRARY.md`: public API, ownership, failure modes and compatibility.
+- `docs/HANDOFF.md`: reviewed implementation and development handoff.
+- `docs/RELEASE_RESULT.md`: current validation and historical-evidence limits.
+- `docs/RELEASE_REQUIREMENTS.md`: requirement-to-test mapping.
+- `docs/BUILD_PLAN.md`: retained historical development sequence.
 
-Do not restate the spec elsewhere. Reference requirement IDs in code docstrings, tests, and handoffs.
+Reference requirements in code, tests and handoffs. Do not duplicate or silently
+weaken the specification. Work on branches and obtain independent review before
+merging into main or publishing artifacts.
 
-## Milestone and review workflow
+## Implementation and verification
 
-1. Work on a feature branch; never commit to or merge into `main` without review.
-2. Implement one milestone at a time, as scoped in the build plan. Do not start the next one.
-3. Write focused tests for observable behavior. Use real MCP transport for enforcement proofs; mock-only tests are not proof.
-4. Never weaken an acceptance criterion or edit a fixed evaluation case to make a run pass. Surface contradictions that would change product behavior instead of resolving them silently.
-5. Run `uv run pytest`, update `docs/HANDOFF.md` (requirement IDs completed, changed files, commands and results, limitations, remaining work), commit, and stop for independent review.
+- Use explicit local stdio configuration. Keep state outside the installed package
+  and outside cloud-synced directories. Preserve user state and frozen evidence.
+- Keep public ownership/API contracts stable. CLI and console operations must use
+  the owning SDK rather than independent private-table writes.
+- Add meaningful tests for observable behavior. Enforcement proofs require real
+  transport; mocks alone do not prove nondispatch or server receipt.
+- Run `uv sync --locked`, relevant tests, and `uv run pytest`. Node.js is required
+  by the console JavaScript checks (`MTM_REQUIRE_NODE=1` in CI).
+- Release checks additionally build fresh distributions, install outside the
+  checkout, and check the public typing consumer. Follow the pinned workflows.
+- For documentation-only changes, check requirement references, links, consistency
+  and `git diff --check`; do not claim new runtime validation.
 
-## Rules
+## Trust, memory and evidence
 
-- Never print, log, or commit secrets. Report integrations as working only after an actual successful call; label fixture data `synthetic_fixture`.
-- The model may recommend review or quarantine but never approves and never overrides a deterministic hard denial.
-- The runtime model provider is OpenAI (`gpt-6-astra`, Responses API, strict Structured Outputs); see SPEC "Runtime model provider". Claude Code is the implementation tool, not a runtime dependency.
-- Run commands from the repository root: `uv sync`, `uv run pytest`, `uv run python -m mcp_trust_monitor --help`.
+- Never print, log, commit or publish secrets, private approval records or raw
+  service identifiers. Synthetic examples are explicitly labeled.
+- A model can recommend review or quarantine, never approve a tool or override a
+  deterministic hard denial. Enabled adapter failure must not silently weaken a
+  required assessment.
+- Memory is opt-in and off by default. A human verdict and exact lesson-content
+  approval are separate requirements. Only verified, private, locally eligible
+  lessons may contribute; restore is not a correctness verdict.
+- Preserve frozen evaluation cases and failed results. Do not turn held-out
+  expectations into reviewed verdicts or rerun an experiment to improve its score.
+- Dispatch means transport handoff and a possible side effect, not proof of server
+  receipt. Generic refusals establish local nondispatch; an independent server
+  counter is separate evidence.
+- The historical demos are `python -m mcp_trust_monitor.historical_demo` and use
+  separate state. The generic CLI is `python -m mcp_trust_monitor`.
+- OpenAI is the optional runtime reviewer; implementation tools are not runtime
+  dependencies. Historical live outcomes do not certify a current service account.
