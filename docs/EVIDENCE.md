@@ -1,5 +1,11 @@
 # Evidence and provenance
 
+> Historical provenance and service status. These dated observations are not a
+> fresh validation of the public alpha. See [RELEASE_RESULT.md](RELEASE_RESULT.md)
+> for current runtime checks and retained experiment limits. Private provider
+> identifiers have been omitted from the public tree.
+
+
 ## Saved research snapshot
 
 The earlier workspace research produced an array of **35 server records containing 287 tool definitions**. These counts were recomputed from the saved JSON during repository setup on 9 October 2026. The original file was copied into ignored local storage at `data/local/registry_snapshot.json`.
@@ -34,6 +40,28 @@ The prototype's actual JSON output contains one record per attempted endpoint, w
 
 The project specification proposes behavior; it is not evidence that those capabilities are implemented. Demonstrate each capability with an actual run before including it in a submission claim.
 
+## Decision-record exports
+
+Exported decision records (REQ-AUD-03, schema version 2) are recorded local
+evidence. They do not establish classification correctness, executable safety or
+server receipt:
+
+- `dispatch_started` and `outcome_unknown` mean the request was handed to the stdio
+  transport and may have taken effect. Hand-off is not proof that the server
+  received the request. `completion_recorded` adds the outcome the client observed
+  (`outcome`).
+- `independent_counter_verified_blocked` requires a linked, complete server-side
+  counter that did not change. A local refusal without such a counter is only
+  `verification_unavailable`.
+- Identifiers are keyed pseudonyms, fresh for each export unless the operator
+  supplies a key. Retained content digests, timestamps and counts can still confirm
+  guesses or link exports. The export is pseudonymous, not anonymous; see
+  [the library guide](LIBRARY.md#decision-record-export-and-privacy).
+
+Exports made with schema version 1, before 13 October 2026, used unsalted SHA-256
+identifiers and kept UUIDs verbatim. Their identifiers can be confirmed by
+guessing, so treat them as linkable to the original identifiers.
+
 ## Integration smoke tests
 
 Run on 9 October 2026 during M0. Semgrep and ClickHouse were exercised against the real tools; nothing below is mocked.
@@ -42,7 +70,7 @@ Run on 9 October 2026 during M0. Semgrep and ClickHouse were exercised against t
 | --- | --- | --- |
 | Semgrep (local) | Working | Semgrep 1.180.0 run ephemerally with `uvx`, no login. A throwaway custom `generic`-language rule scanned the fixture descriptions: 2 matches, 0 errors. When logged out, `extra.lines` is the literal string `requires login`; exact evidence spans must be sliced from the scanned bytes using `start.offset` and `end.offset`, which was verified. Not installed globally. |
 | ClickHouse Cloud | Working | `uv run python scripts/smoke_clickhouse.py` (HTTPS interface, credentials from `.env`): 8 of 8 checks passed against server 26.6.1.2326. After review, each check also validates the returned value; the rerun matched every expected value. A later run failed: its first two requests timed out at 60 s, the third succeeded after 23 s, and it exited 1. The cause is unconfirmed; idle suspension is the likely explanation but was not verified. An immediate rerun matched all 8 expected values. `SELECT 1`; database `mcp_trust_monitor` exists; a session-scoped temporary table accepted a `JSONEachRow` insert and returned it; `CHECK GRANT` confirms `CREATE TABLE` and `INSERT` on the database. Each request took about 190–310 ms. No persistent table was created. The application does not write to ClickHouse yet (M2). |
-| Senso | Working in the application (M3) | On 9 October 2026 the repository authenticated to organization "MCP Trust Monitor". It uploaded only `policies/demo-policy.json`: content ID `44916d1c-a5db-4e68-96d8-9d6afa1b8784`, processed in 14.1 s and saved in the ignored `.env`. A scoped `POST /org/search/context` with `require_scoped_ids: true` returned 4 passages, all from that ID and all verified against the policy file. Senso's edge rejects urllib's default user agent (Cloudflare 1010), so the client sends its own. |
+| Senso | Working in the application (M3) | On 9 October 2026 the repository authenticated to organization "MCP Trust Monitor". It uploaded only `policies/demo-policy.json`: content ID `[private provider identifier omitted]`, processed in 14.1 s and saved in the ignored `.env`. A scoped `POST /org/search/context` with `require_scoped_ids: true` returned 4 passages, all from that ID and all verified against the policy file. Senso's edge rejects urllib's default user agent (Cloudflare 1010), so the client sends its own. |
 | Model API (OpenAI) | Working in the application (M3) | The repository calls `gpt-6-astra` through the official `openai` SDK (2.54.0) and the Responses API, with strict Structured Outputs and no tools. Live `demo-m3` and `evaluate` runs on 9 October 2026 returned validated assessments; see HANDOFF. |
 
 ### Application use (M2, 9 October 2026, 15:17 PDT)

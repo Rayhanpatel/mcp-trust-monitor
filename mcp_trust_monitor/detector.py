@@ -23,6 +23,8 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Collection, Mapping, Sequence
@@ -95,7 +97,8 @@ def semgrep_command() -> list[str]:
     return [uvx, "--from", f"semgrep=={SEMGREP_VERSION}", "semgrep"]
 
 
-def _run(arguments: Sequence[str], *, timeout: float, cwd: str | None = None) -> str:
+def _run(arguments: Sequence[str], *, timeout: float, cwd: str | None = None,
+         cancel_event: threading.Event | None = None) -> str:
     command = [*semgrep_command(), *arguments]
     try:
         # Own process group, so a timeout also stops the Semgrep process uvx started.
@@ -105,7 +108,21 @@ def _run(arguments: Sequence[str], *, timeout: float, cwd: str | None = None) ->
     except OSError as exc:
         raise DetectorError(f"semgrep could not start: {exc}") from exc
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        if cancel_event is None:
+            stdout, stderr = process.communicate(timeout=timeout)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                if cancel_event.is_set():
+                    raise DetectorError('semgrep cancelled')
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    stdout, stderr = process.communicate(timeout=min(.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     except subprocess.TimeoutExpired as exc:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -113,6 +130,13 @@ def _run(arguments: Sequence[str], *, timeout: float, cwd: str | None = None) ->
             pass
         process.communicate()
         raise DetectorError(f"semgrep timed out after {timeout:g}s") from exc
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise
     if process.returncode != 0:
         raise DetectorError(f"semgrep exited {process.returncode}: {stderr[-300:]}")
     return stdout
@@ -132,6 +156,7 @@ def scan_tools(
     rules_path: Path = DEFAULT_RULES,
     known_policy_ids: Collection[str] | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    cancel_event: threading.Event | None = None,
 ) -> DetectorResult:
     try:
         rules_bytes = Path(rules_path).read_bytes()
@@ -154,7 +179,7 @@ def scan_tools(
             targets[str(path)] = (str(tool["name"]), data)
         stdout = _run(["scan", "--metrics=off", "--disable-version-check", "--quiet", "--json",
                        "--config", str(rules_copy.resolve()), *targets],
-                      timeout=timeout_seconds, cwd=tmp)
+                      timeout=timeout_seconds, cwd=tmp, cancel_event=cancel_event)
         try:
             report = json.loads(stdout)
             if report.get("version") != SEMGREP_VERSION:

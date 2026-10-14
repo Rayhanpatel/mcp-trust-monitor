@@ -1,0 +1,101 @@
+{
+  "schema": "mcp-trust-monitor.historical-evidence-summary.v1",
+  "status": "historical_only_not_current_runtime_validation",
+  "evidence_date": "2026-10-12",
+  "recovery_date": "2026-10-14",
+  "verification": {
+    "prior_manifest_hash_checks_passed": 31,
+    "distinct_files_with_prior_hash_match": 19,
+    "core_historical_evidence_missing": false,
+    "method": "Recovered original private records and compared their bytes with preexisting historical manifests. Recomputed aggregate comparison metrics from the hash-matched result file. No new comparison or remote service call was performed.",
+    "historical_independent_review_checks": 209,
+    "historical_independent_review_checks_rerun": false
+  },
+  "comparison": {
+    "model": "gpt-6-astra",
+    "independent_synthetic_cases": 8,
+    "families": 6,
+    "pairs_per_case": 3,
+    "scheduled_trials": 48,
+    "automatic_retries": 0,
+    "active_approved_lessons": 3,
+    "modes": {
+      "off": {
+        "trials": 24,
+        "combined_outcomes": {
+          "pass": 24
+        },
+        "model_only_outcomes": {
+          "pass": 24
+        },
+        "valid_provider_responses": 24,
+        "retrieval_returned": 0,
+        "trials_with_precedent_citations": 0,
+        "median_end_to_end_seconds": 10.02,
+        "usage": {
+          "input_tokens": 34089,
+          "output_tokens": 5791,
+          "total_tokens": 39880
+        }
+      },
+      "on": {
+        "trials": 24,
+        "combined_outcomes": {
+          "pass": 24
+        },
+        "model_only_outcomes": {
+          "pass": 24
+        },
+        "valid_provider_responses": 24,
+        "retrieval_returned": 24,
+        "trials_with_precedent_citations": 7,
+        "median_end_to_end_seconds": 13.63,
+        "usage": {
+          "input_tokens": 48014,
+          "output_tokens": 6150,
+          "total_tokens": 54164
+        }
+      }
+    },
+    "conclusion": "No demonstrated decision improvement; memory remains off by default."
+  },
+  "revocation": {
+    "historical_report_hash_verified": true,
+    "provider_response_completed_before_revocation": true,
+    "application_was_pending": true,
+    "network_request_was_pending": false,
+    "stale_response_rejected": true,
+    "next_search_excluded_revoked_lesson": true,
+    "existing_quarantines_preserved": 26,
+    "frozen_comparison_unchanged": true
+  },
+  "audit_delivery": {
+    "historical_report_hash_verified": true,
+    "local_event_ids_present_in_recorded_remote_readback": 931,
+    "runs": 9,
+    "pending_outbox_at_snapshot": 0,
+    "remote_readback_repeated_during_recovery": false
+  },
+  "six_case_regression": {
+    "historical_live_report_hash_verified": true,
+    "combined_passes": 6,
+    "model_assessments": 4,
+    "deterministic_skips": 2,
+    "local_only_combined_passes": 5,
+    "local_only_combined_blocked_misses": 1,
+    "local_only_model_assessments": 0
+  },
+  "retained_corrections": [
+    "The original comparison exposed readable case labels and remains functional evidence only.",
+    "The failed opaque-v2 startup and its frozen inputs are retained. The original report records all 48 scheduled failures before model/service calls.",
+    "The corrected run reused the same eight cases with a different lesson snapshot; the runs must not be pooled."
+  ],
+  "limits": [
+    "These reports predate the repair batches and do not validate the current alpha runtime or current remote service availability.",
+    "Eight repeated synthetic cases do not establish broad accuracy, statistical significance, decision improvement or a general latency/cost benchmark.",
+    "No dollar cost was calculated.",
+    "Raw provider request bytes and complete retrieved policy text were not originally persisted; they cannot be recovered.",
+    "Manifest matching demonstrates consistency with the retained historical manifests; it is not independent cryptographic authentication of those manifests.",
+    "Raw records, provider identifiers, private lesson bodies/identifiers, legacy decision exports, videos and screenshots remain private and are not included in this summary."
+  ]
+}

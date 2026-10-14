@@ -148,7 +148,11 @@ async def verify_blocked(
             problems.append(f"server-side counter unavailable: {type(exc).__name__}: "
                             f"{str(exc)[:200]}")
             return None
-        return value if isinstance(value, int) else None
+        # bool is an int subclass; it is not an independently measured call count.
+        if type(value) is not int or value < 0:
+            problems.append("server-side counter unavailable: invalid nonnegative integer")
+            return None
+        return value
 
     before = counter()
     dispatched_before = client.dispatch_count(server_id)

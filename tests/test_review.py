@@ -249,6 +249,15 @@ async def test_valid_zero_evidence_still_verifies(env):
         assert "verified_blocked" in event_types(client)
 
 
+@pytest.mark.parametrize("invalid", [True, False, -1, 1.0, "0"])
+async def test_malformed_counter_never_qualifies_as_verified(env, invalid):
+    async with env.client() as client:
+        quarantine = await quarantined_lookup(env, client, call_first=False)
+        detail = await verify_blocked(client, LOOKUP, "lookup_document", ARGS,
+                                      lambda: invalid, quarantine=quarantine)
+        assert_failed_not_verified(client, detail)
+
+
 @pytest.mark.parametrize("content", ["not json\n", '["a list"]\n', '{"no_method": 1}\n',
                                      '{"method": 7}\n'],
                          ids=["not-json", "not-object", "no-method", "method-not-string"])

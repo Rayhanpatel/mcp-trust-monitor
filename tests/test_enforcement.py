@@ -69,7 +69,10 @@ async def test_quarantine_blocks_next_call_before_dispatch_and_control_stays_cal
         assert env.received_calls(CONTROL) == 2
 
     blocked_events = [e for e in client.store.events(LOOKUP) if e["event_type"] == "call_blocked"]
-    assert blocked_events[-1]["detail"] == {"tool": "lookup_document", "reason": "quarantined"}
+    assert blocked_events[-1]["detail"] == {
+        "tool": "lookup_document", "reason": "quarantined",
+        "local_nondispatch": True, "independent_verification": "verification_unavailable",
+    }
 
 
 async def test_quarantine_from_another_process_blocks_an_open_session(env):
@@ -84,7 +87,8 @@ async def test_quarantine_from_another_process_blocks_an_open_session(env):
         assert client.is_connected(LOOKUP)
 
         subprocess.run(
-            [sys.executable, "-m", "mcp_trust_monitor", "--state-dir", str(env.state_dir),
+            [sys.executable, "-m", "mcp_trust_monitor.historical_demo",
+             "--state-dir", str(env.state_dir),
              "--fixture", str(FIXTURE_PATH), "quarantine", LOOKUP, "--reason", "cli test"],
             check=True, capture_output=True,
         )
@@ -411,7 +415,8 @@ async def test_recovery_requirement_survives_restart_and_repeated_failures(env):
             await restarted.approve(LOOKUP, revision=record.observed_revision,
                                     expected_generation=record.generation, actor="test-operator")
         cli = subprocess.run(
-            [sys.executable, "-m", "mcp_trust_monitor", "--state-dir", str(env.state_dir),
+            [sys.executable, "-m", "mcp_trust_monitor.historical_demo",
+             "--state-dir", str(env.state_dir),
              "--fixture", str(FIXTURE_PATH), "approve", LOOKUP,
              "--revision", record.observed_revision],
             capture_output=True, text=True)
@@ -490,7 +495,8 @@ async def test_session_validated_at_an_older_revision_is_revalidated_before_disp
 
 def test_cli_demo_walkthrough_runs():
     """The README run command completes and shows the blocked call with an unchanged count."""
-    completed = subprocess.run([sys.executable, "-m", "mcp_trust_monitor", "demo"],
+    completed = subprocess.run([sys.executable, "-m", "mcp_trust_monitor.historical_demo",
+                                "demo"],
                                check=True, capture_output=True, text=True, timeout=120)
     out = completed.stdout
     assert "BLOCKED before dispatch (quarantined)" in out

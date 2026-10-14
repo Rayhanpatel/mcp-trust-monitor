@@ -7,6 +7,13 @@ quoted untrusted data together with the scoped policy passages retrieved from
 Senso. Refusals, incomplete responses, empty output, and malformed JSON raise
 `ModelError`; nothing about a failed call is treated as a result.
 
+Response metadata is per attempt. `last_response_id`, `last_model`, and
+`last_usage` are reset before every request. They stay None when no response
+arrives (timeout, connection, or API error). When a response arrives they are
+captured from that response before any status check, so an incomplete, refused,
+empty, malformed, or later validation-rejected response keeps its own ID, model,
+and usage. A failure never carries the previous response's metadata (REQ-EVAL-02).
+
 `validate_assessment` checks traceability: the server, revision, and generation
 echo the assessed ones, policy IDs exist in the loaded policy, source content IDs
 were actually retrieved, and every evidence span appears verbatim in the assessed
@@ -18,7 +25,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .senso import RetrievedPolicy
 
@@ -134,7 +141,10 @@ class OpenAIAssessor:
     """Bounded Responses API call with strict Structured Outputs and no tools."""
 
     def __init__(self, api_key: str, model: str = DEFAULT_MODEL, *, timeout_seconds: float = 90.0,
-                 max_retries: int = 2, max_output_tokens: int = 8000, client: Any = None) -> None:
+                 max_retries: int = 2, max_output_tokens: int = 8000, client: Any = None,
+                 instructions: str = INSTRUCTIONS,
+                 input_builder: Callable[..., str] = build_input,
+                 schema_builder: Callable[[Sequence[str]], dict[str, Any]] = assessment_schema) -> None:
         if client is None:
             if not api_key:
                 raise ModelError("configuration", "OPENAI_API_KEY is not set")
@@ -143,23 +153,40 @@ class OpenAIAssessor:
         self._client = client
         self.model = model
         self.max_output_tokens = max_output_tokens
+        self.instructions = instructions
+        self.input_builder = input_builder
+        self.schema_builder = schema_builder
+        # Reported with evaluation results; SDK retries are not otherwise visible.
+        self.max_retries = max_retries
         self.last_response_id: str | None = None
+        self.last_model: str | None = None
+        self.last_usage: dict[str, Any] | None = None
+
+    def response_metadata(self) -> dict[str, Any]:
+        """The latest attempt's own response ID, model, and usage; None if no response."""
+        return {"response_id": self.last_response_id, "model": self.last_model,
+                "usage": self.last_usage}
 
     def assess(self, context: ReviewContext, previous_tools: Sequence[Mapping[str, Any]],
                retrieved: RetrievedPolicy) -> Any:
+        # Per attempt: a failure must never report the previous response's metadata.
+        self.last_response_id = self.last_model = self.last_usage = None
         try:
             response = self._client.responses.create(
                 model=self.model,
-                instructions=INSTRUCTIONS,
-                input=build_input(context, previous_tools, retrieved),
+                instructions=self.instructions,
+                input=self.input_builder(context, previous_tools, retrieved),
                 text={"format": {"type": "json_schema", "name": "mcp_tool_assessment",
-                                 "schema": assessment_schema(context.rule_ids), "strict": True}},
+                                 "schema": self.schema_builder(context.rule_ids), "strict": True}},
                 max_output_tokens=self.max_output_tokens,
                 store=False,
             )
         except Exception as exc:  # timeout, connection, rate limit, or API error
             raise ModelError("api_error", f"{type(exc).__name__}: {str(exc)[:300]}") from None
+        # A response arrived: keep its own metadata even if it is unusable below.
         self.last_response_id = getattr(response, "id", None)
+        self.last_model = getattr(response, "model", None)
+        self.last_usage = _usage_dict(getattr(response, "usage", None))
         status = getattr(response, "status", None)
         if status != "completed":
             details = getattr(response, "incomplete_details", None)
@@ -249,6 +276,19 @@ def validate_assessment(raw: Any, context: ReviewContext) -> ValidatedAssessment
                                policy_ids=tuple(sorted(set(policy_ids))),
                                source_content_ids=tuple(dict.fromkeys(sources)),
                                evidence=tuple(spans), explanation=explanation)
+
+
+def _usage_dict(usage: Any) -> dict[str, Any] | None:
+    """JSON-safe token usage from a Responses API usage object, if one was returned."""
+    if usage is None:
+        return None
+    if isinstance(usage, Mapping):
+        return {str(key): value for key, value in usage.items()}
+    dump = getattr(usage, "model_dump", None)
+    if callable(dump):
+        return dump()
+    fields = ("input_tokens", "output_tokens", "total_tokens")
+    return {key: getattr(usage, key) for key in fields if getattr(usage, key, None) is not None}
 
 
 def _is_str_list(value: Any) -> bool:
