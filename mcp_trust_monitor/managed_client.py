@@ -11,6 +11,16 @@ succeeded and recorded the revision the store currently holds. A session validat
 at an older revision is re-observed before dispatch, so a persisted approval cannot
 stand in for current metadata.
 
+Strict sessions are also bound to the launch identity captured immediately before
+their process was spawned, because the configured identity is recomputed from the
+filesystem (REQ-REV-04). Startup fails when the configured identity changed before
+initialization completed. An observation is recorded, with the session's own identity,
+only while the configured identity and the record's identity still equal it; otherwise
+it is an observation failure. A session whose identity differs from the record's never
+dispatches and contributes no catalog entries (`launch_identity_changed`), even when its
+metadata is identical. This is path and configuration identity, not a code signature:
+a target swapped and restored while a process starts is not detected.
+
 A connection, initialization, or tools/list failure atomically moves an approved
 server to pending review and records `observation_failed` (quarantine is
 preserved), then closes the failing session (REQ-REV-02). Because every session of
@@ -105,8 +115,11 @@ class ServerConfig:
     @property
     def endpoint(self) -> str:
         """Endpoint identity without arguments, which could carry credentials."""
-        return f"stdio:{self.server_id}#{self.launch_identity}"
+        return _endpoint(self.server_id, self.launch_identity)
 
+
+def _endpoint(server_id: str, launch_identity: str) -> str:
+    return f"stdio:{server_id}#{launch_identity}"
 
 
 class CallBlocked(Exception):
@@ -158,11 +171,18 @@ class ObservationError(Exception):
 class _Connection:
     """Owns one stdio session in a dedicated task so it can close independently.
 
-    A live resource: compared and hashed by identity."""
+    A live resource: compared and hashed by identity.
+
+    `launch_identity` is the configured identity captured immediately before this
+    session's process is spawned; it never follows later changes to the configuration
+    or filesystem. With `bind_launch_identity` (strict clients), startup fails when the
+    configured identity no longer matches it once initialization completed (REQ-REV-04).
+    """
 
     config: ServerConfig
     timeout: timedelta
     launch_identity: str = field(init=False)
+    bind_launch_identity: bool = False
     session: ClientSession | None = None
     # From the MCP initialize result; recorded as observation provenance (REQ-REV-03).
     server_name: str | None = None
@@ -201,6 +221,11 @@ class _Connection:
     @property
     def alive(self) -> bool:
         return self.session is not None and self._task is not None and not self._task.done()
+
+    @property
+    def endpoint(self) -> str:
+        """Endpoint identity of the process this session runs (REQ-REV-03)."""
+        return _endpoint(self.config.server_id, self.launch_identity)
 
     @property
     def finished(self) -> bool:
@@ -245,11 +270,20 @@ class _Connection:
                 env=self.config.launch_env(),
                 cwd=self.config.cwd,
             )
+            # The spawn below runs the configured (not dereferenced) command path; this
+            # captures what that path identifies immediately before it is spawned.
+            self.launch_identity = self.config.launch_identity
             async with stdio_client(params) as (read, write):
                 transport = _DispatchStream(write, self) if self.dispatch else write
                 async with ClientSession(read, transport, read_timeout_seconds=self.timeout,
                                          message_handler=self._message) as session:
                     initialized = await session.initialize()
+                    if (self.bind_launch_identity
+                            and self.config.launch_identity != self.launch_identity):
+                        # The configured target changed while this process started: it
+                        # may be running either one, so the session is never used.
+                        raise ObservationError(
+                            f"launch identity of {self.config.server_id} changed during startup")
                     self.server_name = initialized.serverInfo.name
                     self.server_version = initialized.serverInfo.version
                     self.protocol_version = str(initialized.protocolVersion)
@@ -735,6 +769,10 @@ class ManagedClient:
     def _session_reason(self, record, connection):
         if connection is None or not connection.alive or connection.observed_at is None:
             return "session_refresh_required"
+        if self.strict and connection.launch_identity != record.launch_identity:
+            # This session runs a process other than the one the record (and any
+            # approval of it) identifies, even when its metadata is identical.
+            return "launch_identity_changed"
         if connection.validated_revision != record.observed_revision:
             return "session_not_validated"
         if connection.dirty_epoch != connection.observed_epoch:
@@ -765,6 +803,7 @@ class ManagedClient:
         if connection is not None:
             await self._disconnect(server_id)
         connection = _Connection(self.servers[server_id], self._timeout,
+                                 bind_launch_identity=self.strict,
                                  notification=self.notification,
                                  dispatch=self._dispatch if self.strict else None)
         self._opened.add(connection)
@@ -796,15 +835,25 @@ class ManagedClient:
             except ValueError as exc:
                 raise ObservationError(f"invalid tools/list from {server_id}: {exc}") from exc
             config = self.servers[server_id]
+            if self.strict:
+                # The metadata came from this session's process: record it only while
+                # the configuration and the record still identify that process
+                # (REQ-REV-04). No await separates this check from the record below.
+                current = self.store.get(server_id)
+                if (config.launch_identity != connection.launch_identity
+                        or (current is not None
+                            and current.launch_identity != connection.launch_identity)):
+                    raise ObservationError(
+                        f"launch identity of {server_id} changed during observation")
             record = self.store.record_observation(
                 server_id, revision, tools,
-                provenance={"endpoint": config.endpoint, "transport": "stdio",
+                provenance={"endpoint": connection.endpoint, "transport": "stdio",
                             "server_name": connection.server_name,
                             "server_version": connection.server_version,
                             "protocol_version": connection.protocol_version,
                             "raw_tools_json": json.dumps(raw_tools, sort_keys=True),
                             "origin": config.origin,
-                            "launch_identity": config.launch_identity if self.strict else None},
+                            "launch_identity": connection.launch_identity if self.strict else None},
             )
         except (Exception, asyncio.CancelledError) as exc:
             # A failed or incomplete observation never leaves a session eligible.
