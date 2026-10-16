@@ -1,8 +1,9 @@
 # MCP Trust Monitor alpha release handoff
 
-Version: **0.2.0a1**. The public release is prepared from the independently reviewed
-local runtime and the existing public hackathon history. Private approval records
-and raw provider evidence are retained locally and excluded from this public tree.
+Version: **0.2.0a2 corrective alpha candidate** (unpublished; the public release is
+0.2.0a1). The public release was prepared from the independently reviewed local
+runtime and the existing public hackathon history. Private approval records and
+raw provider evidence are retained locally and excluded from this public tree.
 
 ## Current implementation
 
@@ -28,14 +29,56 @@ The local repair series independently verified these behaviors before publicatio
 - Export identifiers use scoped keyed pseudonyms, including UUID-shaped inputs.
 - Eligible verdict assessments are independent of the bounded display timeline.
 
+## Corrective alpha repairs (16 October 2026, unpublished candidate)
+
+A post-release review of 0.2.0a1 found four defects. Each was reproduced against
+the 0.2.0a1 code with temporary synthetic state before repair, and each has
+regression tests that fail on 0.2.0a1 and pass on the candidate:
+
+- **D1 launch identity.** A session is bound to the launch identity captured
+  before its process started. An identity change during startup or observation is
+  an observation failure, and a session whose identity differs from the trust
+  record never dispatches or appears in the catalog (`launch_identity_changed`).
+  Previously, a symlink retargeted during `tools/list`, or an older connected
+  session, could receive calls under an approval recorded for the new target.
+- **D2 detector binding.** Approvals, generations, selection tokens and console
+  intents bind the decision binding: the policy binding plus the detector binding
+  (or `disabled`). A detector-only change by reload or reopen is now a genuine
+  change; an equal declaration is a no-op. The JSON CLI config's optional
+  `detector_binding` lets the CLI and an SDK owner declare the same pair.
+- **D3 optional descriptions.** A valid absent tool description no longer fails
+  model review before the model runs; non-string descriptions still fail.
+- **D4 failure provenance.** Failed and stale assessment exports keep returned
+  policy source IDs and memory `enabled`/`status`, still pseudonymized.
+
+Upgrading a 0.2.0a1 state directory fails closed once: approvals return to pending
+review, generations advance and quarantine is preserved. An earlier binary opening
+upgraded state also returns 0.2.0a2 approvals to pending review. There is no store
+schema change. See [LIBRARY.md](LIBRARY.md) for the compatibility details.
+
+Known limits and follow-ups:
+- Launch identity is path and configuration identity, so a target swapped and
+  restored during startup is not detected.
+- A session refused for a changed identity keeps its blocked process until it is
+  observed again or closed.
+- The export does not yet carry a separate detector-binding digest.
+- Invalid description types are refused only after scoped policy retrieval.
+
 Current store schema is 4; export schema is 2. Older binaries that only support
 store schema 3 refuse upgraded stores. Back up a stopped state directory and use
 a compatible backup for downgrades.
 
 ## Verification
 
-The independently reviewed runtime passed **570 tests in each of four local
-runs**: Python 3.10 and 3.12 on macOS ARM64 and Linux ARM64. Regression tests
+The 0.2.0a2 candidate code passed **637 tests in each of four local runs**: macOS
+ARM64 and Linux ARM64 (unprivileged), each on Python 3.10 and 3.12. The 0.2.0a1
+code fails the new regression tests for the defect reasons. Installed-wheel,
+typing and cross-version state checks passed. An independent review was resolved
+to a final verdict of ready. Hosted CI has not run on the candidate. See
+[RELEASE_RESULT.md](RELEASE_RESULT.md) for the exact results.
+
+The 0.2.0a1 runtime passed **570 tests in each of four local runs**: Python 3.10
+and 3.12 on macOS ARM64 and Linux ARM64. Regression tests
 reproduce the repaired failures on their pre-fix versions. The installed core-only
 consumer, separate-process CLI, public typing, distribution assets and real
 filesystem-server version transition also passed.

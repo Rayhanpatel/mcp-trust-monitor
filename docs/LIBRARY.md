@@ -1,4 +1,4 @@
-# Library guide: 0.2.0a1 alpha
+# Library guide: 0.2.0a2 corrective alpha candidate
 
 MCP Trust Monitor owns a set of explicitly configured local stdio MCP sessions.
 It exposes only approved, fresh tool definitions and checks durable trust again
@@ -38,7 +38,8 @@ Example JSON for the generic CLI:
 
 Configuration paths resolve beside the config file:
 
-- relative `state_dir`, `policy_path` and server `cwd` values are config-relative;
+- relative `state_dir`, `policy_path`, `detector_binding` and server `cwd` values
+  are config-relative;
 - an omitted or `null` server `cwd` is the config file's own directory;
 - relative executable `command` paths containing a native path separator (such as
   `./server` or `bin/server`), plus `.` and `..`, are config-relative even when
@@ -59,6 +60,15 @@ argument such as `data.json` is read by the server relative to its `cwd`.
 variable to an environment reference that the caller supplies; only the reference
 name contributes to identity. Do not put secrets in command arguments or plain `env`.
 Keep `state_dir` on local storage that is not synced by iCloud or similar services.
+
+The optional `detector_binding` names an operator-authored detector binding JSON
+file (format under Optional adapters). Every owner of one state directory, the CLI
+and any SDK application alike, must declare the same policy and detector: an owner
+that declares a different pair, or none, makes a genuine decision-context change and
+returns approvals to pending review (see Public API and lifecycle). Owning commands,
+including `quarantine`, refuse to start while the named binding file is missing or
+invalid; keep it readable, because removing `detector_binding` to regain control is
+itself a change that resets approvals.
 
 **Compatibility (0.2.0a1 repair).** Earlier candidates resolved an omitted `cwd`
 and relative executable paths against the invoking directory. Those paths now
@@ -103,19 +113,39 @@ async. The caller owns the event loop. `new_session()` creates an independent
 transport session within the same owner; it shares durable trust and server
 coordination, but must establish its own fresh observation.
 
-Approve and restore decisions name an exact revision and generation. A genuine
-policy change (a `reload_policy` to a different binding, or reopening the owner
-with a different policy file) advances every server's generation, whatever its
-state, and records `decision_context_invalidated`; quarantine stays quarantined and
-approvals bound to the old policy return to pending review. Inputs prepared
-before the change are then refused with `StaleDecisionError`: read the status
+Approve and restore decisions name an exact revision and generation. Approvals,
+generations and selection tokens are bound to the owner's **decision binding**
+(`TrustMonitor.decision_binding`): the policy binding plus the active detector
+binding, or `disabled`. The detector part covers its declared policy digest, rules
+digest, rule mapping and scanned fields, not the rules file's location. A genuine
+change, by `reload_policy` or by reopening the owner, is a different policy file or
+a different detector declaration, including enabling or disabling detection. It
+advances every server's generation, whatever its state, and records
+`decision_context_invalidated`; quarantine stays quarantined and approvals bound to
+the old pair return to pending review. Inputs and selection tokens prepared before
+the change are then refused (`StaleDecisionError`, `CallBlocked`): read the status
 again, review the current state and decide with the new generation. Reloading the
-same binding, or reopening with an unchanged policy, changes no generation.
+same pair, or reopening with an unchanged policy and equal detector declaration,
+changes no generation. `TrustMonitor.policy.binding` still identifies the policy
+document alone; lesson scope and assessment contexts use it unchanged.
 
 Catalog entries are immutable and expose only name, description, and inputSchema.
-Selection tokens bind server, launch profile, revision, generation, policy and
-session. A token cannot silently select a replacement. Tokenless calls use
+Selection tokens bind server, launch profile, revision, generation, decision
+binding and session. A token cannot silently select a replacement. Tokenless
+calls use
 latest-approved semantics after every other gate passes.
+
+Each session is bound to the launch identity captured immediately before its
+process started. If the configured identity changes while that process starts or
+is observed (for example, an executable symlink is retargeted), the observation
+fails (`observation_failed`) and its metadata is not recorded. A session whose
+identity differs from the trust record's never dispatches and contributes no
+catalog entries: its calls are refused as `launch_identity_changed`, which
+`health()` also reports as its freshness, until a new observation under the
+current identity and an explicit approval. The configured path is still the one
+launched, so virtualenv interpreter symlinks keep their meaning. Launch identity is
+path and configuration identity, not a code signature: a target swapped and
+restored while a process starts is not detected.
 
 An ordinary call never launches or refreshes a server. A new process/session
 needs `observe_and_call`, which checks persisted approval before launch and
@@ -191,7 +221,13 @@ Read-only status/events can coexist with an owner. A different CLI process has n
 fresh transport, so its protected catalog is empty. Mutating CLI commands refuse
 while another process owns the state directory. The generic JSON CLI intentionally
 configures local-only operation; applications explicitly compose cloud adapters
-through the SDK. `call` exits 3 when refused before dispatch and 4 when the request
+through the SDK. With a `detector_binding`, `review`, `monitor` and `serve` run the
+deterministic scan locally through the pinned `uvx` Semgrep 1.180.0 command, which
+may download Semgrep on first use; set `MCP_TRUST_SEMGREP` to a verified local
+executable for offline operation. Read-only commands do not read the binding file.
+`review` prints its result and exits 1 when the detector or assessment failed or
+was stale; nothing is approved either way. `call` exits 3 when refused before
+dispatch and 4 when the request
 was dispatched but its outcome is unknown or unrecorded (`"dispatched": true`).
 Dispatched means the request was handed to the stdio transport and may have taken
 effect; it is not proof that the server received it. Never retry such a call
@@ -227,7 +263,12 @@ read-only and never takes ownership, so the database file is unchanged. Beside a
 store that no owner has open, SQLite may leave its coordination files: an empty
 `-wal` and a `-shm` index. Raw metadata, arguments, passages, lesson text,
 explanations and error messages are omitted. Each record keeps the recommendation, validation, applied
-action and dispatch/verification level as separate fields. Exported decisions are
+action and dispatch/verification level as separate fields. Policy-source
+provenance keeps requested, returned and cited source IDs separate on failed and
+stale assessments too: returned IDs are present when scoped policy retrieval
+completed and `null` when it did not, and cited IDs exist only for a validated
+assessment. A failed attempt with memory enabled reports its memory `enabled`
+flag and a `status` of `retrieval_failed` or `not_attempted`. Exported decisions are
 not proof of classification correctness or independently verified prevention.
 `dispatch_started` and `outcome_unknown` mean a request was handed to the transport
 and may have taken effect, not that the server is proven to have received it.
@@ -278,19 +319,28 @@ across exports.
 
 `DetectorBinding` binds a rules file's exact digest and actual rule inventory to
 the policy digest. Unknown, omitted, or incompatible rule mappings are rejected
-even when a scan would find no match. `OpenAIReviewer` retrieves verified scoped
+even when a scan would find no match. Activating a different binding is a genuine
+decision-context change (see Public API and lifecycle). A custom detector object
+must declare a string `rules_digest`; one that does not is refused before
+activation. `OpenAIReviewer` retrieves verified scoped
 Senso policy and validates strict model output; models can only review or request
-quarantine. `ClickHouseSink` sends local outbox batches outside enforcement locks.
+quarantine. A tool whose optional description is absent is reviewed normally; its
+description adds no text to the bounded precedent query, while a description of
+any other non-string type fails the attempt. `ClickHouseSink` sends local outbox
+batches outside enforcement locks.
 Disabled integrations are reported as disabled. Adapter failures do not approve
 changed metadata, and cannot erase a locally committed quarantine.
 
 `examples/reviewed_monitor.py` composes the model, scoped Senso retrieval, optional
 history and console. Supply `--config` and `--env-file` explicitly. Enable history
 with `--clickhouse`; enable reviewed memory with `--memory --capability-evidence
-PROBE.json`. Deterministic scanning additionally needs `--detector-binding
-BINDING.json`; omission reports it disabled. The binding JSON has `rules_path`
-(relative to that binding file), `policy_digest`, `rules_digest` and
-`rule_mapping` (Semgrep rule IDs to policy IDs). This is an explicit operator
+PROBE.json`. Deterministic scanning needs a binding: the config's
+`detector_binding`, or `--detector-binding BINDING.json`, which replaces it; with
+neither, it is reported disabled. Declare it in the config when the CLI also owns
+the same state, so both declare the same pair. The binding JSON has `rules_path`
+(relative to that binding file), `policy_digest`, `rules_digest`, `rule_mapping`
+(Semgrep rule IDs to policy IDs) and optional `scanned_fields`. This is an
+explicit operator
 declaration and is validated against the actual policy and rule inventory.
 
 `MemoryService` shares the monitor's store and policy. Its explicit lifecycle is
@@ -320,6 +370,18 @@ activated policy; upgrading from version 3 happens atomically on the first ownin
 open. Binaries that support only version 3 (including the earlier `6e21602` and
 `8f74a74` candidates) refuse an upgraded store, so keep a backup if you may need
 them.
+
+**Compatibility (0.2.0a2 corrective candidate).** Earlier releases, including the
+published 0.2.0a1, bound approvals to the policy alone and did not record which
+detector was active. The first owning open by 0.2.0a2 therefore counts as a genuine
+decision-context change, with or without a detector: approved servers return to
+pending review, every generation advances and quarantine is preserved. Observe,
+review and approve again; later opens with the same policy and detector change
+nothing. The store schema stays 4. An earlier binary can still open the state, but
+its policy-only binding never equals a 0.2.0a2 decision binding, so it also returns
+0.2.0a2 approvals to pending review: decisions made by either version fail closed
+under the other. Selection tokens and console intents from before the upgrade are
+stale.
 
 Back up a stopped owner's complete state directory before an upgrade. Older
 binaries must use separate state; restoring a compatible backup is the downgrade

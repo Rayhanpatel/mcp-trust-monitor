@@ -32,8 +32,9 @@ inspection and never substitutes for the approved catalog.
 
 Approval and restore act only on the state you reviewed (REQ-TRU-02, REQ-UI-02).
 The first time the page shows a server, it pins that view as your review: server,
-trust state, revision, generation, active policy binding, launch identity and the
-covered metadata shown. The five-second refresh updates the status figures but
+trust state, revision, generation, active decision binding (policy plus detector,
+shown as "Active policy"), launch identity and the covered metadata shown. The
+five-second refresh updates the status figures but
 never this target. When the current state differs, the page lists each difference,
 shows the new metadata separately and disables approve and restore until you
 choose **Review the current state**, which re-pins to what is now shown. This
@@ -41,8 +42,9 @@ includes changes caused by your own actions, such as observing new metadata. The
 request carries the pinned `revision`, `generation`, `policy_binding` and
 `launch_identity`. The console backend refuses a supplied policy binding or launch
 identity that is no longer current, and the SDK refuses a stale revision or
-generation. A genuine policy change advances every server's generation, so an
-action prepared before it is refused even if the page has not refreshed yet.
+generation. A genuine policy or detector change advances every server's
+generation, so an action prepared before it is refused even if the page has not
+refreshed yet.
 Quarantine is server-scoped. Observe starts the configured
 stdio process; this library is not a process sandbox. The page never runs tool
 calls to probe protection and never infers `verified_blocked` from a quarantine.

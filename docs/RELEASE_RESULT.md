@@ -1,4 +1,4 @@
-# MCP Trust Monitor 0.2.0a1 — alpha verification
+# MCP Trust Monitor alpha verification: 0.2.0a1 release and 0.2.0a2 candidate
 
 This is a bounded **local stdio Python alpha**. Its public SDK, CLI, monitor,
 operator console and optional adapters are implemented. It is not a claim of
@@ -6,7 +6,96 @@ production readiness, general prompt-injection protection or arbitrary executabl
 safety. Runtime behavior and requirements are documented in [LIBRARY.md](LIBRARY.md)
 and [SPEC.md](SPEC.md).
 
-## Current runtime validation
+## 0.2.0a2 corrective candidate validation (16 October 2026, unpublished)
+
+The candidate repairs four defects found in 0.2.0a1; see [HANDOFF.md](HANDOFF.md).
+These results come from local runs of the candidate code. They are not hosted CI,
+and they are not validated by the historical live results or the 0.2.0a1 hosted
+runs below.
+
+The full suite ran from a clean git archive of the candidate code, with
+`MTM_REQUIRE_NODE=1` and no cloud credential variables present. It passed
+**637 tests in each run**:
+
+| Environment | Python | Result |
+| --- | --- | --- |
+| macOS ARM64 | 3.10.22 | 637 passed, no skips |
+| macOS ARM64 | 3.12.7 | 637 passed, no skips |
+| Linux ARM64, unprivileged container user | 3.10.22 | 637 passed, no skips |
+| Linux ARM64, unprivileged container user | 3.12.15 | 637 passed, no skips |
+
+**Pre-repair reproduction.** Each defect was reproduced against the 0.2.0a1 code,
+using temporary synthetic state and real stdio servers that log received calls:
+
+- **D1:** with the configured executable symlink retargeted during the first
+  `tools/list`, observation, approval and the call all succeeded, and the call
+  reached the old process. With two sessions, the old session's tokenless and
+  catalog-token calls reached the old process after the new target was approved.
+- **D2:** after a reload with different valid detector rules, the generation stayed
+  at 2, approval stayed, the old selection token dispatched (the server log shows
+  1 call), and an approval prepared before the reload was accepted.
+- **D3:** a tool without a description made the review fail with `TypeError` at the
+  retrieval stage, before the local fake model was called.
+- **D4:** a model failure after successful policy retrieval exported
+  `returned_content_ids: null`.
+
+On the candidate, from the source tree and from the installed wheel, every one of
+these is refused or corrected, and the logs record no unintended call. The 77 tests
+in the five new or extended regression files were also run against the 0.2.0a1
+library code. 53 fail there for the defect reasons. The other 24 pass on both
+versions; they deliberately guard unchanged behavior, such as identical-binding
+no-ops, an unchanged virtualenv interpreter symlink, invalid description types
+and successful export records.
+
+**Installed artifacts.** A wheel and source archive were built from a clean
+archive of the candidate. The installed wheel was then checked outside the
+checkout with core-only dependencies, on Python 3.10 and 3.12. These checks passed:
+
+- public API and packaged resources;
+- separate-process CLI;
+- custom Semgrep binding, with a real scan;
+- launch-identity invalidation;
+- keyed pseudonymous export;
+- the four defect reproductions above.
+
+The strict typing consumer passed, and its seven invalid uses were rejected.
+Artifact checksums are recorded with the local evidence rather than in this tree,
+because the source archive contains this file.
+
+**Cross-version state.** One synthetic state directory was owned in turn by the
+0.2.0a1 code and the candidate, over real stdio:
+
+1. Under 0.2.0a1, an approval was created and survived a restart.
+2. The first candidate open returned it to pending review. Generations advanced,
+   the quarantined server stayed quarantined, and the call was refused until the
+   server was re-approved.
+3. An unchanged candidate reopen changed nothing.
+4. A detector change under the candidate reset approval again.
+5. 0.2.0a1 then opened the upgraded state without error, returned the candidate's
+   approval to pending review and refused the call. The server log did not move.
+
+The store stayed at schema 4 throughout.
+
+**Independent review.** A separate reviewer examined the combined change in three
+rounds, including mutation checks of the new guards. Its findings were resolved
+before these runs:
+
+- the CLI can now declare the detector binding;
+- the post-initialization identity check has a test;
+- the decision binding is now the activated value;
+- CLI `review` reports a failed scan with exit 1.
+
+The final verdict was ready. Deferred follow-ups are listed in HANDOFF.md.
+
+Not done for the candidate:
+
+- hosted CI on Linux AMD64 and macOS;
+- Windows;
+- any live OpenAI, Senso or ClickHouse call;
+- reruns of frozen evaluations;
+- publication.
+
+## 0.2.0a1 release validation
 
 The independently reviewed repair snapshot passed **570 tests in each run**:
 
