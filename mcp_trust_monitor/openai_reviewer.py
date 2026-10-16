@@ -27,6 +27,24 @@ def _policy_query(path) -> str:
     return (prefix + " requirements " + requirements)[:2000]
 
 
+def _precedent_query(tools) -> str:
+    """Generic, bounded query from observed descriptions only, never tool arguments.
+
+    MCP descriptions are optional and an omitted one is recorded as None, which
+    contributes no text. Any other non-string value is invalid metadata and fails
+    the attempt instead of being coerced into query text.
+    """
+    descriptions = []
+    for tool in tools:
+        description = tool.get("description")
+        if description is None:
+            continue
+        if not isinstance(description, str):
+            raise TypeError("observed tool description must be a string or absent")
+        descriptions.append(description)
+    return ("Operator-reviewed precedents for tool metadata change: " + " ".join(descriptions))[:2000]
+
+
 @dataclass(frozen=True)
 class ReviewAttempt:
     server_id: str
@@ -128,9 +146,7 @@ class OpenAIReviewer:
             stage = "retrieval"
             retrieved_policy = await retrieve_policy_async(self.senso_client, ids, path, query=_policy_query(path))
             assert_current()
-            # Generic, bounded query contains only configured metadata, never tool arguments.
-            query = "Operator-reviewed precedents for tool metadata change: " + " ".join(
-                tool.get("description", "") for tool in record.observed_tools)
+            query = _precedent_query(record.observed_tools)
             memory_retrieval_attempted = True
             retrieved_memory = await memory.retrieve(query, self.memory_backend,
                 enabled=self.memory_enabled, top_k=self.top_k)
