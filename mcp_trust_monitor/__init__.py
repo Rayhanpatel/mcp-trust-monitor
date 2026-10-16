@@ -17,7 +17,7 @@ from .trust_store import (AssessmentOutcome, ObservationRequiredError,
                           SchemaCompatibilityError, StaleDecisionError, StorageFaultError,
                           TrustError, TrustRecord, TrustState)
 
-__version__ = "0.2.0a1"
+__version__ = "0.2.0a2"
 __all__ = ["TrustMonitor", "MonitorConfig", "ConfigurationError", "ServerConfig",
            "SelectionToken", "CatalogEntry", "PolicyRef", "DetectorBinding", "load_policy",
            "TrustState", "TrustRecord", "AssessmentOutcome", "TrustError",

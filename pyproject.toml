@@ -1,6 +1,6 @@
 [project]
 name = "mcp-trust-monitor"
-version = "0.2.0a1"
+version = "0.2.0a2"
 description = "Managed MCP client that binds tool trust to reviewed metadata revisions and enforces quarantine before dispatch."
 readme = "README.md"
 requires-python = ">=3.10"
