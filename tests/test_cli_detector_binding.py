@@ -83,12 +83,25 @@ def test_config_binding_resolves_beside_the_binding_file(tmp_path):
 def test_malformed_binding_files_are_refused(tmp_path, change):
     config = project(tmp_path)
     path = config.parent / "rules" / "binding.json"
-    path.write_text(json.dumps({**json.loads(path.read_text()), **change}))
+    valid = json.loads(path.read_text())
+    path.write_text(json.dumps({**valid, **change}))
     with pytest.raises(ConfigurationError):
         load_config(config)
+
+
+@pytest.mark.parametrize("field", ["rules_path", "policy_digest", "rules_digest", "rule_mapping"])
+def test_binding_files_missing_a_field_or_unreadable_are_refused(tmp_path, field):
+    config = project(tmp_path)
+    path = config.parent / "rules" / "binding.json"
     missing = json.loads(path.read_text())
-    missing.pop("policy_digest")
+    missing.pop(field)
     path.write_text(json.dumps(missing))
+    with pytest.raises(ConfigurationError):
+        load_config(config)
+    path.write_text("{not json")
+    with pytest.raises(ConfigurationError):
+        load_config(config)
+    path.unlink()
     with pytest.raises(ConfigurationError):
         load_config(config)
 
@@ -142,3 +155,33 @@ async def test_owners_declaring_different_pairs_still_fail_closed(tmp_path):
     assert refused.returncode == 3
     assert json.loads(refused.stderr)["reason"] == "pending_review"
     assert calls(config) == 0
+
+
+async def test_read_only_commands_do_not_need_the_binding_file(tmp_path):
+    config = project(tmp_path)
+    async with TrustMonitor(load_config(config)) as monitor:
+        await monitor.observe("local")
+    (config.parent / "rules" / "binding.json").rename(config.parent / "moved-binding.json")
+    for command in ("status", "events", "catalog", "export"):
+        result = cli(config, command)
+        assert result.returncode == 0, (command, result.stderr)
+    assert json.loads(cli(config, "status").stdout)[0]["server_id"] == "local"
+    refused = cli(config, "observe", "local")  # an owner must activate the declared pair
+    assert refused.returncode != 0
+    assert json.loads(refused.stderr)["error"] == "ConfigurationError"
+
+
+def test_cli_review_exits_nonzero_when_the_detector_scan_fails(tmp_path, monkeypatch):
+    config = project(tmp_path)
+    record = json.loads(cli(config, "observe", "local").stdout)
+    cli(config, "approve", "local", "--revision", record["observed_revision"],
+        "--generation", str(record["generation"]))
+    monkeypatch.setenv("MCP_TRUST_SEMGREP", str(tmp_path / "missing-semgrep"))
+    reviewed = cli(config, "review", "local")
+    assert reviewed.returncode == 1, reviewed.stderr
+    result = json.loads(reviewed.stdout)
+    assert (result["detector"], result["outcome"]) == ("failed", "failed")
+    status = json.loads(cli(config, "status").stdout)[0]
+    assert status["state"] == "approved"  # a failed scan neither approves nor revokes
+    events = [event["event_type"] for event in json.loads(cli(config, "events").stdout)]
+    assert "detector_failed" in events

@@ -31,14 +31,15 @@ def _json(value: Any) -> Any:
     return value
 
 
-def load_config(path: Path):
+def load_config(path: Path, *, detector: bool = True):
     """Load JSON without resolving credential references or launching any server.
 
     Relative ``state_dir``, ``policy_path``, ``detector_binding``, server ``cwd`` and
     path-like executable commands resolve beside the config file; an omitted or null
     ``cwd`` uses that directory too. An optional ``detector_binding`` names the
     operator's binding JSON, so every owner of the state directory can declare the same
-    policy/detector pair (REQ-DEC-06). Bare executable names retain caller PATH lookup. Arguments and
+    policy/detector pair (REQ-DEC-06). ``detector=False`` skips reading it, for commands
+    that only read the store and never activate a binding. Bare executable names retain caller PATH lookup. Arguments and
     credential references stay literal. The SDK's ``ServerConfig(cwd=None)`` still
     uses the process working directory when ``MonitorConfig`` is constructed.
     """
@@ -92,13 +93,16 @@ def load_config(path: Path):
         row["cwd"] = str(path.parent if row.get("cwd") is None else external(row["cwd"]))
         config = ServerConfig(**row)
         servers[config.server_id] = config
-    detector = (None if raw.get("detector_binding") is None
-                else load_detector_binding(external(raw["detector_binding"])))
+    binding = None
+    if detector and raw.get("detector_binding") is not None:
+        binding = load_detector_binding(external(raw["detector_binding"]))
+    elif raw.get("detector_binding") is not None:
+        external(raw["detector_binding"])  # still a well-formed path
     options = {k: v for k, v in raw.items()
                if k not in {"state_dir", "policy_path", "servers", "detector_binding"}}
     return MonitorConfig(state_dir=external(raw["state_dir"]),
                          policy_path=external(raw["policy_path"]), servers=servers,
-                         detector=detector, **options)
+                         detector=binding, **options)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -141,8 +145,10 @@ def parser() -> argparse.ArgumentParser:
 
 async def run(args: argparse.Namespace) -> int:
     from .sdk import TrustMonitor
-    config = load_config(args.config)
-    if args.command in {"status", "catalog", "events", "export"}:
+    read_only = args.command in {"status", "catalog", "events", "export"}
+    # Read-only snapshots never activate a binding, so they do not need its file.
+    config = load_config(args.config, detector=not read_only)
+    if read_only:
         # A second writer is prohibited, but operator snapshots can coexist with it.
         # A different process has no fresh backing transport, so its catalog is empty.
         from .managed_client import trust_db_path
@@ -199,6 +205,8 @@ async def run(args: argparse.Namespace) -> int:
         else:
             raise ValueError("unknown command")
         print(json.dumps(_json(output), ensure_ascii=False, indent=2))
+        if args.command == "review" and {output.detector, output.assessment, output.outcome} & {"failed", "stale"}:
+            return 1  # The assessment did not complete; nothing was approved (REQ-DEC-04).
         return 1 if getattr(output, "isError", False) else 0
 
 

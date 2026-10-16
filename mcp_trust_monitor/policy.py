@@ -88,7 +88,10 @@ def load_detector_binding(path: Path) -> "DetectorBinding":
     """
     from .config import ConfigurationError
     path = Path(path).expanduser().resolve()
-    document = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigurationError("detector binding file could not be read as JSON") from exc
     if (not isinstance(document, dict) or not _BINDING_FIELDS <= set(document)
             or set(document) - _BINDING_FIELDS - {"scanned_fields"}
             or not all(isinstance(document[key], str) and document[key]
