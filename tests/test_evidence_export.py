@@ -7,8 +7,16 @@ from uuid import uuid4
 
 import pytest
 
+from conftest import LOOKUP
+from mcp_trust_monitor import TrustMonitor
+from mcp_trust_monitor.assessor import ModelError
 from mcp_trust_monitor.evidence import export_decision_records
+from mcp_trust_monitor.memory import MemoryService, SearchPassage
+from mcp_trust_monitor.openai_reviewer import OpenAIReviewer
+from mcp_trust_monitor.senso import SensoError
 from mcp_trust_monitor.trust_store import TrustStore
+from test_memory_service import active
+from test_openai_reviewer_adapter import Assessor, PolicySource, config
 
 REV = "sha256:" + "1" * 64
 POLICY = "customer@one#sha256:" + "2" * 64
@@ -202,3 +210,179 @@ def test_old_decision_uses_historical_launch_evidence_without_current_state():
     assert first["observation_id"] not in json.dumps(exported)
     assert row["decision"]["recommendation"] is None
     assert row["decision"]["action"] == "operator_approval"
+
+
+# Reviewer failure provenance: real stdio observation and store, local fakes only.
+
+POLICY_SOURCE = "policy-source"
+
+
+class ModelFails(Assessor):
+    def assess(self, *args):
+        raise ModelError("api_error", SECRET)
+
+
+class PolicySourceFails(PolicySource):
+    def search_context(self, query, content_ids, max_results=20):
+        raise SensoError(SECRET)
+
+
+def reviewer(*, assessor=Assessor, source=None, backend=None):
+    return OpenAIReviewer(api_key="not-real", model="test", senso_client=source or PolicySource(),
+        policy_content_ids=(POLICY_SOURCE,), assessor_factory=assessor,
+        memory_enabled=backend is not None, memory_backend=backend)
+
+
+def exports(owned):
+    """Default export plus two operator-key exports, each record keyed by its raw event ID."""
+    raw = owned.events()
+    exported = export_decision_records(owned)
+    keyed = export_decision_records(owned, pseudonym_key=KEY)
+    again = export_decision_records(owned, pseudonym_key=KEY)
+    assert keyed["records"] == again["records"] and keyed["observations"] == again["observations"]
+    assert len(raw) == len(exported["records"]) == len(keyed["records"])
+    rows = {item["event_id"]: row for item, row in zip(raw, exported["records"])}
+    keyed_rows = {item["event_id"]: row for item, row in zip(raw, keyed["records"])}
+    return raw, exported, rows, keyed_rows
+
+
+def failure(raw, stage, count=1):
+    found = [item for item in raw if item["event_type"] == "model_assessment_failed"
+             and item["detail"]["stage"] == stage]
+    assert len(found) == count, [item["detail"] for item in raw]
+    return found
+
+
+def assert_no_raw_identifiers(exported, raw, *values):
+    serialized = json.dumps(exported)
+    for value in (POLICY_SOURCE, LOOKUP, SECRET, "model-reviewer", "test-response", *values,
+                  *(item["event_id"] for item in raw), *(item["run_id"] for item in raw)):
+        assert not isinstance(value, str) or value not in serialized, value
+
+
+@pytest.mark.anyio
+async def test_reviewer_failures_export_known_policy_provenance(env):
+    async with TrustMonitor(config(env)) as owned:
+        await owned.observe(LOOKUP)
+        model_failed = await reviewer(assessor=ModelFails)(owned, LOOKUP)
+        retrieval_failed = await reviewer(source=PolicySourceFails())(owned, LOOKUP)
+        succeeded = await reviewer()(owned, LOOKUP)
+        assert (model_failed.stage, retrieval_failed.stage, succeeded.stage) == (
+            "model", "retrieval", "completed")
+        raw, exported, rows, keyed_rows = exports(owned)
+    [model_event], [retrieval_event] = failure(raw, "model"), failure(raw, "retrieval")
+    assert model_event["detail"]["policy_returned_content_ids"] == [POLICY_SOURCE]
+    assert "policy" not in model_event["detail"]  # the failure record has no policy dict
+    assert retrieval_event["detail"]["policy_returned_content_ids"] is None
+    success_event = next(item for item in raw if item["event_id"] == succeeded.assessment_event_id)
+
+    model, retrieval, success = (rows[item["event_id"]] for item in
+                                 (model_event, retrieval_event, success_event))
+    requested = success["retrieval"]["policy"]["requested_content_ids"]
+    assert len(requested) == 1 and requested[0].startswith("pid:")
+    # Failure after completed policy retrieval: returned is known, and nothing was cited.
+    assert model["decision"]["failure_stage"] == "model"
+    assert model["retrieval"]["policy"] == {"requested_content_ids": requested,
+        "requested_ids_basis": "explicit", "returned_content_ids": requested,
+        "cited_content_ids": None}
+    # Failure before policy retrieval completed: returned stays unavailable.
+    assert retrieval["decision"]["failure_stage"] == "retrieval"
+    assert retrieval["retrieval"]["policy"] == {"requested_content_ids": requested,
+        "requested_ids_basis": "explicit", "returned_content_ids": None,
+        "cited_content_ids": None}
+    # A successful record is unchanged: returned from policy.content_ids, cited separately.
+    assert success["retrieval"]["policy"] == {"requested_content_ids": requested,
+        "requested_ids_basis": "explicit", "returned_content_ids": requested,
+        "cited_content_ids": requested}
+    # Memory was disabled for every attempt; the failures now say so instead of null.
+    for row in (model, retrieval, success):
+        assert row["retrieval"]["memory"]["status"] == "disabled"
+        assert row["retrieval"]["memory"]["enabled"] is False
+    assert model["retrieval"]["memory"]["cited_lesson_ids"] is None
+    assert retrieval["retrieval"]["memory"]["cited_lesson_ids"] is None
+    assert retrieval["retrieval"]["memory"]["returned_content_ids"] is None
+    assert success["retrieval"]["memory"]["cited_lesson_ids"] == []
+    keyed_model = keyed_rows[model_event["event_id"]]["retrieval"]["policy"]
+    assert keyed_model["returned_content_ids"] == keyed_model["requested_content_ids"]
+    assert keyed_model["requested_content_ids"] != requested  # a different key, a different pseudonym
+    assert_no_raw_identifiers(exported, raw)
+
+
+@pytest.mark.anyio
+async def test_memory_failures_export_known_status_enabled_and_policy_provenance(env):
+    async with TrustMonitor(config(env)) as owned:
+        await owned.observe(LOOKUP)
+        memory = MemoryService(owned.store, lambda: owned.policy, rule_ids=("POL-001", "POL-002"))
+        lesson, backend = await active(memory)
+        not_attempted = await reviewer(source=PolicySourceFails(), backend=backend)(owned, LOOKUP)
+        backend.search_results = [SearchPassage("foreign-content", lesson.body)]
+        memory_failed = await reviewer(assessor=ModelFails, backend=backend)(owned, LOOKUP)
+        backend.search_results = None
+        model_failed = await reviewer(assessor=ModelFails, backend=backend)(owned, LOOKUP)
+        assert [(item.stage, item.memory_status) for item in (not_attempted, memory_failed, model_failed)] == [
+            ("retrieval", "not_attempted"), ("retrieval", "retrieval_failed"), ("model", "returned")]
+        raw, exported, rows, keyed_rows = exports(owned)
+    first, second = failure(raw, "retrieval", 2)
+    [third] = failure(raw, "model")
+    not_attempted_row, memory_failed_row, model_row = (rows[item["event_id"]] for item in (first, second, third))
+    lesson_ids = model_row["retrieval"]["memory"]["requested_content_ids"]
+    policy_ids = model_row["retrieval"]["policy"]["requested_content_ids"]
+    assert len(lesson_ids) == len(policy_ids) == 1 and lesson_ids != policy_ids
+
+    # Policy retrieval failed first: neither policy nor memory returned anything.
+    assert not_attempted_row["retrieval"]["policy"]["returned_content_ids"] is None
+    assert not_attempted_row["retrieval"]["memory"] == {
+        "status": "not_attempted", "enabled": True, "scope_id": None, "registry_revision": None,
+        "requested_content_ids": [], "returned_content_ids": None, "cited_lesson_ids": None,
+        "returned_lessons": []}
+    # Policy retrieval completed, memory retrieval failed: policy returned is known.
+    assert memory_failed_row["retrieval"]["policy"]["returned_content_ids"] == policy_ids
+    assert memory_failed_row["retrieval"]["policy"]["cited_content_ids"] is None
+    assert memory_failed_row["retrieval"]["memory"]["status"] == "retrieval_failed"
+    assert memory_failed_row["retrieval"]["memory"]["enabled"] is True
+    assert memory_failed_row["retrieval"]["memory"]["requested_content_ids"] == lesson_ids
+    assert memory_failed_row["retrieval"]["memory"]["returned_content_ids"] is None
+    assert memory_failed_row["retrieval"]["memory"]["returned_lessons"] == []
+    # Both retrievals completed, then the model failed: returned known, nothing cited.
+    assert model_row["retrieval"]["policy"]["returned_content_ids"] == policy_ids
+    assert model_row["retrieval"]["policy"]["cited_content_ids"] is None
+    assert model_row["retrieval"]["memory"]["status"] == "returned"
+    assert model_row["retrieval"]["memory"]["enabled"] is True
+    assert model_row["retrieval"]["memory"]["returned_content_ids"] == lesson_ids
+    assert model_row["retrieval"]["memory"]["cited_lesson_ids"] is None
+    keyed = keyed_rows[second["event_id"]]["retrieval"]
+    assert keyed["policy"]["returned_content_ids"] == keyed["policy"]["requested_content_ids"]
+    assert keyed["memory"]["status"] == "retrieval_failed" and keyed["memory"]["enabled"] is True
+    assert_no_raw_identifiers(exported, raw, lesson.content_id, lesson.node_id, lesson.lesson_id,
+                              lesson.series_id, lesson.verdict_id, lesson.body, "foreign-content",
+                              "opaque-version-uuid")
+
+
+def test_failure_provenance_fallbacks_accept_only_known_shapes_and_vocabulary():
+    base = {"stage": "model", "policy_requested_content_ids": ["policy-a"]}
+    accepted = event("model_assessment_failed", detail={**base,
+        "policy_returned_content_ids": ["policy-a"],
+        "memory": {"status": "retrieval_failed", "enabled": True,
+                   "requested_content_ids": ["memory-a"], "returned_content_ids": None}})
+    malformed = [event("model_assessment_failed", detail={**base, "policy_returned_content_ids": value,
+                       "memory": {"status": status, "enabled": enabled}})
+                 for value, status, enabled in (("policy-a", SECRET, "true"), (["policy-a", 7], "Retrieval_Failed", 1),
+                                                ({"policy-a": True}, "not attempted", None), (1, ["not_attempted"], 0))]
+    # Success records keep their own sources: the policy dict wins and the snapshot wins.
+    success = event(detail={**base, "policy": {"content_ids": ["policy-a"]},
+        "policy_returned_content_ids": ["policy-b"], "source_content_ids": ["policy-a"],
+        "memory": {"status": "none_eligible", "enabled": False, "snapshot": {"enabled": True}}})
+    rows = export_decision_records(monitor([accepted, *malformed, success]))["records"]
+    policy_a = rows[0]["retrieval"]["policy"]["requested_content_ids"]
+    assert rows[0]["retrieval"]["policy"]["returned_content_ids"] == policy_a
+    assert rows[0]["retrieval"]["memory"]["status"] == "retrieval_failed"
+    assert rows[0]["retrieval"]["memory"]["enabled"] is True
+    for row in rows[1:-1]:
+        assert row["retrieval"]["policy"]["returned_content_ids"] is None
+        assert row["retrieval"]["memory"]["status"] is None
+        assert row["retrieval"]["memory"]["enabled"] is None
+    assert rows[-1]["retrieval"]["policy"]["returned_content_ids"] == policy_a
+    assert rows[-1]["retrieval"]["policy"]["cited_content_ids"] == policy_a
+    assert rows[-1]["retrieval"]["memory"]["status"] == "none_eligible"
+    assert rows[-1]["retrieval"]["memory"]["enabled"] is True
+    assert SECRET not in json.dumps(rows)

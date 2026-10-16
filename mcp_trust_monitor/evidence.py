@@ -257,6 +257,10 @@ _REASONS = _STATES | {
     "revision_not_approved", "tool_not_in_approved_revision",
     "transport_backpressure", "transport_closed",
 }
+# RetrievedMemory statuses, plus the reviewer's fixed failure statuses for an enabled
+# attempt that failed during, or stopped before, memory retrieval.
+_MEMORY_STATUSES = {"disabled", "none_eligible", "none_returned", "returned",
+                    "retrieval_failed", "not_attempted"}
 _LINKS = ("assessment_event_id", "quarantine_requested_event_id", "quarantine_applied_event_id",
           "verdict_id", "lesson_id", "operation_id", "call_id", "supersedes")
 
@@ -345,7 +349,10 @@ def _context(detail: Mapping, event: Mapping, identify: _Identify) -> ContextEvi
 
 def _retrieval(detail: Mapping, identify: _Identify) -> RetrievalEvidence:
     policy = _object(detail.get("policy"))
-    returned_policy = _ids(policy.get("content_ids"), identify)
+    # A reviewer failure record has no policy dict; its top-level list is recorded only
+    # after scoped policy retrieval completed, and is None when it did not.
+    returned_policy = _ids(policy["content_ids"] if "content_ids" in policy
+                           else detail.get("policy_returned_content_ids"), identify)
     requested_policy = _ids(detail.get("policy_requested_content_ids"), identify)
     requested_basis = "explicit" if requested_policy is not None else "not_recorded"
     if requested_policy is None and returned_policy is not None:
@@ -355,6 +362,8 @@ def _retrieval(detail: Mapping, identify: _Identify) -> RetrievalEvidence:
         requested_basis = "successful_exact_scope_policy_retrieval"
     memory = _object(detail.get("memory"))
     snapshot = _object(memory.get("snapshot"))
+    # Without a retrieved snapshot, a reviewer failure records enabled at the top level.
+    enabled = snapshot.get("enabled") if "snapshot" in memory else memory.get("enabled")
     passages = memory.get("passages")
     passages = passages if isinstance(passages, (list, tuple)) else None
     lessons: list[RetrievedLessonEvidence] = [{"lesson_id": identify(item.get("lesson_id")),
@@ -366,9 +375,8 @@ def _retrieval(detail: Mapping, identify: _Identify) -> RetrievalEvidence:
     return {"policy": {"requested_content_ids": requested_policy,
                 "requested_ids_basis": requested_basis, "returned_content_ids": returned_policy,
                 "cited_content_ids": _ids(detail.get("source_content_ids"), identify)},
-            "memory": {"status": _choice(memory.get("status"),
-                    {"disabled", "none_eligible", "none_returned", "returned"}),
-                "enabled": snapshot.get("enabled") if type(snapshot.get("enabled")) is bool else None,
+            "memory": {"status": _choice(memory.get("status"), _MEMORY_STATUSES),
+                "enabled": enabled if type(enabled) is bool else None,
                 "scope_id": identify(snapshot.get("scope")),
                 "registry_revision": _number(snapshot.get("registry_revision")),
                 "requested_content_ids": _ids(memory.get("requested_content_ids"), identify),
