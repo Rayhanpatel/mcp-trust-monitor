@@ -105,6 +105,7 @@ class TrustMonitor:
         self._owner = StateOwner(self.config.state_dir)
         self._policy_path = self.config.policy_path
         self._detector = self.config.detector
+        self._decision_binding: str | None = None
         self._sessions: list[ManagedClient] = []
         self._cancellation = _CancellationTracker()
         self._loop = MonitorLoop(self)
@@ -152,9 +153,12 @@ class TrustMonitor:
 
         Approvals, generations and selection tokens bind this pair (REQ-TRU-02,
         REQ-DEC-06): activating a different pair, by reload or by reopening the owner,
-        is a genuine change; activating the same pair changes nothing.
+        is a genuine change; activating the same pair changes nothing. This is the
+        binding computed at activation, even if a custom detector object changes later.
         """
-        return decision_binding(self.policy, self._detector)
+        if self._decision_binding is None:
+            raise TrustError('monitor is not open')
+        return self._decision_binding
 
     async def __aenter__(self) -> TrustMonitor:
         if self._store is not None:
@@ -180,6 +184,7 @@ class TrustMonitor:
                 self._store.recover_owner()
             self._policy = candidate
             self._store.invalidate_policy(binding)
+            self._decision_binding = binding
             for sid, profile in self.config.servers.items():
                 self._store.ensure_identity(sid, profile.launch_identity)
             self._client = self.new_session()
@@ -464,8 +469,8 @@ class TrustMonitor:
         candidate_detector = self._detector if detector is None else detector
         if candidate_detector is not None:
             candidate_detector.validate(path)
-        decision_binding(candidate, candidate_detector)  # refuse an unidentifiable detector first
-        self._activate_policy(candidate, candidate_detector, path)
+        binding = decision_binding(candidate, candidate_detector)  # refuses an unidentifiable detector
+        self._activate_policy(candidate, candidate_detector, path, binding)
         self._catalog_changed()
         self._loop.last_reviewed.clear()
         self._loop.reset_review_retries()
@@ -474,7 +479,7 @@ class TrustMonitor:
         return candidate
 
     def _activate_policy(self, candidate: PolicyRef, detector: DetectorBinding | None,
-                         path: Path) -> None:
+                         path: Path, binding: str) -> None:
         """Invalidate approvals and switch the active policy/detector pair in one
         synchronous step. A pair whose decision binding differs from the last activated
         one, including a detector-only change, is a genuine change (REQ-DEC-06).
@@ -486,9 +491,9 @@ class TrustMonitor:
         (REQ-ENF-05, REQ-TRU-03). No server lock is held: waiting here for one server's
         observation would delay quarantine and dispatch on every other server.
         """
-        binding = decision_binding(candidate, detector)
         self.store.invalidate_policy(binding)
         self._policy, self._detector = candidate, detector
+        self._decision_binding = binding
         self._policy_path = path
         for session in self._sessions:
             session.policy_revision = binding

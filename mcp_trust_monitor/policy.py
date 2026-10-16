@@ -75,6 +75,37 @@ def load_policy(path: Path) -> PolicyRef:
     )
 
 
+_BINDING_FIELDS = {"rules_path", "policy_digest", "rules_digest", "rule_mapping"}
+
+
+def load_detector_binding(path: Path) -> "DetectorBinding":
+    """Read an operator-authored binding JSON file without validating it against a policy.
+
+    Fields: `rules_path` (relative paths resolve beside this file), `policy_digest`,
+    `rules_digest`, `rule_mapping` (detector rule ID to policy rule ID) and optional
+    `scanned_fields`. The owner validates the binding against the actual policy and rule
+    inventory before activating it (REQ-DEC-06).
+    """
+    from .config import ConfigurationError
+    path = Path(path).expanduser().resolve()
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(document, dict) or not _BINDING_FIELDS <= set(document)
+            or set(document) - _BINDING_FIELDS - {"scanned_fields"}
+            or not all(isinstance(document[key], str) and document[key]
+                       for key in ("rules_path", "policy_digest", "rules_digest"))
+            or not isinstance(document["rule_mapping"], dict)
+            or not all(isinstance(key, str) and isinstance(value, str)
+                       for key, value in document["rule_mapping"].items())
+            or not isinstance(document.get("scanned_fields", []), list)
+            or not all(isinstance(field, str) for field in document.get("scanned_fields", []))):
+        raise ConfigurationError("invalid detector binding file")
+    rules = Path(document["rules_path"]).expanduser()
+    document["rules_path"] = rules if rules.is_absolute() else path.parent / rules
+    if "scanned_fields" in document:
+        document["scanned_fields"] = tuple(document["scanned_fields"])
+    return DetectorBinding(**document)
+
+
 def policy_rule_ids(path: Path) -> frozenset[str]:
     """Rule IDs in the loaded policy; detector matches must cite one of them."""
     document = json.loads(Path(path).read_text(encoding="utf-8"))

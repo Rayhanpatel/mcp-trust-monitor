@@ -352,3 +352,49 @@ async def test_policy_only_binding_written_after_the_repair_is_refused(tmp_path)
         with pytest.raises(CallBlocked):
             await monitor.observe_and_call(SERVER, "effect")
     assert call_count(calls) == 0
+
+
+def custom_detector(**declaration):
+    from types import SimpleNamespace
+    return SimpleNamespace(validate=lambda path: None, scan=lambda tools, path: None, **declaration)
+
+
+async def test_a_detector_without_a_rules_digest_is_refused_before_activation(tmp_path):
+    from mcp_trust_monitor.config import ConfigurationError
+    config, definition, calls = environment(tmp_path, custom_detector())
+    with pytest.raises(ConfigurationError):
+        async with TrustMonitor(config):
+            pass
+    assert not (config.state_dir / "trust.sqlite3").exists()
+    first = binding(rules_file(tmp_path / "rules-a.json"))
+    async with TrustMonitor(replace(config, detector=first)) as monitor:
+        prepared = await prepare(monitor, "approved", definition)
+        token = monitor.catalog(SERVER)[0].selection
+        with pytest.raises(ConfigurationError):
+            await monitor.reload_policy(config.policy_path, custom_detector())
+        assert monitor.detector_binding == first
+        current = monitor.status(SERVER)
+        assert (current.state, current.generation) == (TrustState.APPROVED, prepared.generation)
+        assert not (await monitor.call_tool(SERVER, "effect", selection=token)).isError
+    assert call_count(calls) == 1
+
+
+async def test_the_decision_binding_is_the_one_activated(tmp_path):
+    """Corrective review nit: a custom detector object changed in place is not activated,
+    so the owner, new sessions and the console keep the activated binding until reload."""
+    detector = custom_detector(rules_digest="sha256:" + "1" * 64)
+    config, definition, calls = environment(tmp_path, detector)
+    async with TrustMonitor(config) as monitor:
+        await prepare(monitor, "approved", definition)
+        activated = monitor.decision_binding
+        detector.rules_digest = "sha256:" + "2" * 64
+        assert monitor.decision_binding == activated
+        assert (await ConsoleBackend(monitor).snapshot())["policy_binding"] == activated
+        other = monitor.new_session()
+        await other.observe(SERVER)
+        assert not (await other.call_tool(SERVER, "effect")).isError
+        assert monitor.status(SERVER).state is TrustState.APPROVED
+        await monitor.reload_policy(config.policy_path)  # activates the changed declaration
+        assert monitor.decision_binding != activated
+        assert monitor.status(SERVER).state is TrustState.PENDING_REVIEW
+    assert call_count(calls) == 1

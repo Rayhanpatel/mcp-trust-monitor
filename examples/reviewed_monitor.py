@@ -6,11 +6,10 @@ Run with an explicit --config JSON and --env-file. --memory additionally require
 from __future__ import annotations
 import argparse
 import asyncio
-import json
 from dataclasses import replace
 from pathlib import Path
 
-from mcp_trust_monitor import DetectorBinding, TrustMonitor
+from mcp_trust_monitor import TrustMonitor
 from mcp_trust_monitor.assessor import DEFAULT_MODEL
 from mcp_trust_monitor.console import ConsoleServer
 from mcp_trust_monitor.history import REQUIRED
@@ -19,7 +18,7 @@ from mcp_trust_monitor.library_cli import load_config
 from mcp_trust_monitor.memory import MemoryService
 from mcp_trust_monitor.memory_senso import SensoMemoryBackend
 from mcp_trust_monitor.openai_reviewer import OpenAIReviewer
-from mcp_trust_monitor.policy import policy_rule_ids
+from mcp_trust_monitor.policy import load_detector_binding, policy_rule_ids
 from mcp_trust_monitor.senso import SensoClient, load_env
 
 
@@ -31,13 +30,10 @@ async def run(args):
     settings = load_env(keys, args.env_file)
     if any(not settings.get(key) for key in keys):
         raise ValueError("Explicit environment file is missing required adapter settings")
-    detector = None
-    if args.detector_binding:
-        binding_path = args.detector_binding.resolve()
-        binding = json.loads(binding_path.read_text(encoding="utf-8"))
-        rules = Path(binding["rules_path"])
-        binding["rules_path"] = rules if rules.is_absolute() else binding_path.parent / rules
-        detector = DetectorBinding(**binding)
+    # The config's `detector_binding` applies unless --detector-binding replaces it; every
+    # owner of the state directory must declare the same pair, or approvals are reset.
+    detector = (load_detector_binding(args.detector_binding) if args.detector_binding
+                else config.detector)
     senso = SensoClient(settings["SENSO_API_KEY"])
     backend = (SensoMemoryBackend(senso, capability_evidence=args.capability_evidence)
                if args.memory else None)
@@ -64,7 +60,8 @@ if __name__ == "__main__":
     parser.add_argument("--capability-evidence", type=Path)
     parser.add_argument("--clickhouse", action="store_true")
     parser.add_argument("--detector-binding", type=Path,
-                        help="explicit JSON DetectorBinding; omission reports detector disabled")
+                        help="explicit JSON DetectorBinding, replacing the config's detector_binding; "
+                             "with neither, the detector is reported disabled")
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--scope", default="default")
     parser.add_argument("--port", type=int, default=0)

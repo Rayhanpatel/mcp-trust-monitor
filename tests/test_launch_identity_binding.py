@@ -398,3 +398,47 @@ async def test_unchanged_symlinked_virtualenv_interpreter_keeps_a_stable_identit
         assert calls() == 2
         assert not {"launch_identity_changed", "observation_failed"} & set(kinds(monitor))
         assert observed_identities(monitor) == [identity, identity]
+
+
+async def test_retarget_before_spawn_restored_after_startup_is_rejected_at_startup(tmp_path, monkeypatch):
+    """Corrective review S2: only the post-initialize recheck sees this race.
+
+    The session captures identity A, the symlink is retargeted to B just before the
+    spawn, so process B starts, and it is restored to A before tools/list completes.
+    Without the startup check, B's metadata would be recorded and approved as A's and
+    the call would reach B; the observation-time check alone sees A again.
+    """
+    from mcp_trust_monitor import managed_client
+    launch = swappable(tmp_path, {"list_started": str(tmp_path / "list-started"),
+                                  "list_delay": LIST_DELAY})
+    identity_a = launch.identity
+    real = managed_client.stdio_client
+
+    def retarget_then_spawn(params, *args, **kwargs):
+        launch.point_to(launch.b)  # after the session captured A, before the process starts
+        return real(params, *args, **kwargs)
+
+    monkeypatch.setattr(managed_client, "stdio_client", retarget_then_spawn)
+    async with TrustMonitor(launch.config) as monitor:
+        observing = asyncio.ensure_future(monitor.observe(SERVER))
+        deadline = time.monotonic() + WAIT_SECONDS
+        while not observing.done() and time.monotonic() < deadline:
+            if launch.list_started.exists():  # only reachable if startup was accepted
+                launch.point_to(launch.a)
+                break
+            await asyncio.sleep(0.005)
+        observed = await outcome(observing)
+        monkeypatch.setattr(managed_client, "stdio_client", real)
+        approved = await attempt_approval(monitor)
+        called = await outcome(monitor.call_tool(SERVER, "effect"))
+        assert (launch.calls("A"), launch.calls("B")) == (0, 0), (
+            f"tools/call reached a process (observe -> {describe(observed)}, "
+            f"approve -> {describe(approved)}, call -> {describe(called)})")
+        assert isinstance(observed, ObservationError), observed
+        assert "launch identity" in str(observed)
+        assert not launch.list_started.exists()  # refused before any tools/list
+        assert monitor.status(SERVER) is None and observed_identities(monitor) == []
+        assert isinstance(called, CallBlocked) and called.reason == "unobserved", called
+        identity_b = launch.identity
+        assert identity_b != identity_a
+        await recover_under_b(monitor, launch, identity_b, calls_a=0)

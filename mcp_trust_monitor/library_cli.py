@@ -34,20 +34,24 @@ def _json(value: Any) -> Any:
 def load_config(path: Path):
     """Load JSON without resolving credential references or launching any server.
 
-    Relative ``state_dir``, ``policy_path``, server ``cwd`` and path-like executable
-    commands resolve beside the config file; an omitted or null ``cwd`` uses that
-    directory too. Bare executable names retain caller PATH lookup. Arguments and
+    Relative ``state_dir``, ``policy_path``, ``detector_binding``, server ``cwd`` and
+    path-like executable commands resolve beside the config file; an omitted or null
+    ``cwd`` uses that directory too. An optional ``detector_binding`` names the
+    operator's binding JSON, so every owner of the state directory can declare the same
+    policy/detector pair (REQ-DEC-06). Bare executable names retain caller PATH lookup. Arguments and
     credential references stay literal. The SDK's ``ServerConfig(cwd=None)`` still
     uses the process working directory when ``MonitorConfig`` is constructed.
     """
     from .config import ConfigurationError, MonitorConfig
     from .managed_client import ServerConfig
+    from .policy import load_detector_binding
     path = path.expanduser().resolve()
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("configuration must be an object")
     allowed = {"state_dir", "policy_path", "servers", "client_id", "poll_interval",
-               "timeout_seconds", "shutdown_timeout", "max_concurrency", "review_max_attempts"}
+               "timeout_seconds", "shutdown_timeout", "max_concurrency", "review_max_attempts",
+               "detector_binding"}
     if set(raw) - allowed:
         raise ValueError("unknown configuration fields")
     def external(value: str) -> Path:
@@ -88,9 +92,13 @@ def load_config(path: Path):
         row["cwd"] = str(path.parent if row.get("cwd") is None else external(row["cwd"]))
         config = ServerConfig(**row)
         servers[config.server_id] = config
-    options = {k: v for k, v in raw.items() if k not in {"state_dir", "policy_path", "servers"}}
+    detector = (None if raw.get("detector_binding") is None
+                else load_detector_binding(external(raw["detector_binding"])))
+    options = {k: v for k, v in raw.items()
+               if k not in {"state_dir", "policy_path", "servers", "detector_binding"}}
     return MonitorConfig(state_dir=external(raw["state_dir"]),
-                         policy_path=external(raw["policy_path"]), servers=servers, **options)
+                         policy_path=external(raw["policy_path"]), servers=servers,
+                         detector=detector, **options)
 
 
 def parser() -> argparse.ArgumentParser:

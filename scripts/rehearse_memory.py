@@ -31,7 +31,7 @@ from mcp_trust_monitor.async_assessor import AsyncOpenAIAssessor
 from mcp_trust_monitor.history import sanitize
 from mcp_trust_monitor.memory import MemoryService
 from mcp_trust_monitor.memory_senso import SensoMemoryBackend
-from mcp_trust_monitor.openai_reviewer import OpenAIReviewer
+from mcp_trust_monitor.openai_reviewer import OpenAIReviewer, _precedent_query
 from mcp_trust_monitor.paired_evaluation import _gate, _verdict, digest, freeze_plan, summarize
 from mcp_trust_monitor.policy import policy_rule_ids
 from mcp_trust_monitor.revision import server_revision
@@ -280,8 +280,7 @@ async def demonstrate(monitor, memory, backend, reviewer, factory, server_id, re
         if lesson.lesson_id not in {p['lesson_id'] for p in retrieved['passages']}:
             raise RuntimeError('revoked lesson absent from validated model context')
         save()
-        query = 'Operator-reviewed precedents for tool metadata change: ' + ' '.join(
-            tool.get('description', '') for tool in monitor.status(server_id).observed_tools)
+        query = _precedent_query(monitor.status(server_id).observed_tools)
         remaining = memory.snapshot(enabled=True)
         expected_ids = {item.content_id for item in remaining.lessons}
         searches_before = len(backend.searches)
