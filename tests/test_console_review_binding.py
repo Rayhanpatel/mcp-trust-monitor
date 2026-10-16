@@ -155,7 +155,7 @@ async def test_refresh_never_retargets_approval_and_rereview_is_explicit(tmp_pat
             assert env.monitor.status(SERVER).state is TrustState.UNREVIEWED
             assert start["review-generation"]["text"] == str(reviewed.generation)
             assert start["review-revision"]["text"] == reviewed.observed_revision
-            assert start["review-policy"]["text"] == env.monitor.policy.binding
+            assert start["review-policy"]["text"] == env.monitor.decision_binding
             assert start["review-launch"]["text"] == reviewed.launch_identity
             assert start["approve"]["disabled"] is False
             view = reply["view"]
@@ -183,7 +183,7 @@ async def test_refresh_never_retargets_approval_and_rereview_is_explicit(tmp_pat
             post, = reply["posts"]
             assert post["payload"] == {"action": "approve", "actor": "local-operator", "server_id": SERVER,
                                        "revision": changed.observed_revision, "generation": changed.generation,
-                                       "policy_binding": env.monitor.policy.binding,
+                                       "policy_binding": env.monitor.decision_binding,
                                        "launch_identity": changed.launch_identity}
             assert (post["status"], post["body"]["error"]) == (409, "StaleDecisionError")
             assert env.monitor.status(SERVER).state is TrustState.UNREVIEWED
@@ -248,7 +248,7 @@ async def test_restore_targets_the_reviewed_quarantine(tmp_path):
 async def test_policy_change_between_review_and_click(tmp_path):
     async with environment(tmp_path) as env:
         reviewed = await env.monitor.observe(SERVER)
-        original = env.monitor.policy.binding
+        original = env.monitor.decision_binding
         async with ShippedApp(env.console) as app:
             await app.view("start")
             await env.monitor.reload_policy(env.policy("b"))
@@ -264,7 +264,7 @@ async def test_policy_change_between_review_and_click(tmp_path):
             assert (await app.send("click", id="approve", force=True))["posts"] == []
 
             await app.send("click", id="review-current")
-            second = env.monitor.policy.binding
+            second = env.monitor.decision_binding
             await env.monitor.reload_policy(env.policy("c"))  # Before the next refresh.
             post, = (await app.send("click", id="approve"))["posts"]
             assert post["payload"]["policy_binding"] == second
@@ -274,10 +274,10 @@ async def test_policy_change_between_review_and_click(tmp_path):
             await app.send("tick")
             await app.send("click", id="review-current")
             post, = (await app.send("click", id="approve"))["posts"]
-            assert post["status"] == 200 and post["payload"]["policy_binding"] == env.monitor.policy.binding
+            assert post["status"] == 200 and post["payload"]["policy_binding"] == env.monitor.decision_binding
             record = env.monitor.status(SERVER)
             assert record.state is TrustState.APPROVED
-            assert record.approved_policy_revision == env.monitor.policy.binding
+            assert record.approved_policy_revision == env.monitor.decision_binding
             assert record.generation > reviewed.generation
         assert env.calls_made() == 0
 
@@ -285,13 +285,13 @@ async def test_policy_change_between_review_and_click(tmp_path):
 async def test_backend_refuses_a_stale_policy_or_launch_identity_at_the_current_generation(tmp_path):
     async with environment(tmp_path) as env:
         await env.monitor.observe(SERVER)
-        old = env.monitor.policy.binding
+        old = env.monitor.decision_binding
         await env.monitor.reload_policy(env.policy("b"))
         current = env.monitor.status(SERVER)
         backend = ConsoleBackend(env.monitor, env.memory)
         base = {"action": "approve", "actor": "operator", "server_id": SERVER,
                 "revision": current.observed_revision, "generation": current.generation,
-                "policy_binding": env.monitor.policy.binding, "launch_identity": current.launch_identity}
+                "policy_binding": env.monitor.decision_binding, "launch_identity": current.launch_identity}
         for stale in ({"policy_binding": old}, {"policy_binding": None},
                       {"launch_identity": "stdio:another-launch"}, {"launch_identity": None}):
             with pytest.raises(StaleDecisionError):

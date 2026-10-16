@@ -13,7 +13,7 @@ from .config import ConfigurationError, MonitorConfig
 from .managed_client import CatalogEntry, ManagedClient, SelectionToken, _Connection, trust_db_path
 from .monitor import MonitorLoop
 from .ownership import StateOwner
-from .policy import load_policy, DetectorBinding, PolicyRef
+from .policy import decision_binding, load_policy, DetectorBinding, PolicyRef
 from .trust_store import TrustRecord, TrustStore, TrustError, StorageFaultError, TrustState
 
 
@@ -146,6 +146,16 @@ class TrustMonitor:
     def detector_binding(self) -> DetectorBinding | None:
         return self._detector
 
+    @property
+    def decision_binding(self) -> str:
+        """The active policy binding plus the detector binding (or `disabled`).
+
+        Approvals, generations and selection tokens bind this pair (REQ-TRU-02,
+        REQ-DEC-06): activating a different pair, by reload or by reopening the owner,
+        is a genuine change; activating the same pair changes nothing.
+        """
+        return decision_binding(self.policy, self._detector)
+
     async def __aenter__(self) -> TrustMonitor:
         if self._store is not None:
             raise TrustError('monitor is already open')
@@ -159,6 +169,7 @@ class TrustMonitor:
         candidate = load_policy(self.config.policy_path)
         if self._detector is not None:
             self._detector.validate(self.config.policy_path)
+        binding = decision_binding(candidate, self._detector)
         self._owner.acquire()
         try:
             self._store = TrustStore(trust_db_path(self.config.state_dir), self.config.client_id,
@@ -168,7 +179,7 @@ class TrustMonitor:
             if self._owner.recovery_required:
                 self._store.recover_owner()
             self._policy = candidate
-            self._store.invalidate_policy(candidate.binding)
+            self._store.invalidate_policy(binding)
             for sid, profile in self.config.servers.items():
                 self._store.ensure_identity(sid, profile.launch_identity)
             self._client = self.new_session()
@@ -308,7 +319,7 @@ class TrustMonitor:
         if self._closing:
             raise TrustError('monitor is closing')
         self.store.check_health()
-        result = ManagedClient(self.store, self.config.servers, policy_revision=self.policy.binding,
+        result = ManagedClient(self.store, self.config.servers, policy_revision=self.decision_binding,
                                strict=True, poll_interval=self.config.poll_interval,
                                timeout_seconds=self.config.timeout_seconds,
                                notification=self._loop.notify,
@@ -453,6 +464,7 @@ class TrustMonitor:
         candidate_detector = self._detector if detector is None else detector
         if candidate_detector is not None:
             candidate_detector.validate(path)
+        decision_binding(candidate, candidate_detector)  # refuse an unidentifiable detector first
         self._activate_policy(candidate, candidate_detector, path)
         self._catalog_changed()
         self._loop.last_reviewed.clear()
@@ -463,7 +475,9 @@ class TrustMonitor:
 
     def _activate_policy(self, candidate: PolicyRef, detector: DetectorBinding | None,
                          path: Path) -> None:
-        """Invalidate approvals and switch the active policy in one synchronous step.
+        """Invalidate approvals and switch the active policy/detector pair in one
+        synchronous step. A pair whose decision binding differs from the last activated
+        one, including a detector-only change, is a genuine change (REQ-DEC-06).
 
         This is the synchronization boundary shared with the final dispatch gate, which
         authorizes against the active policy and hands the request to the transport with
@@ -472,11 +486,12 @@ class TrustMonitor:
         (REQ-ENF-05, REQ-TRU-03). No server lock is held: waiting here for one server's
         observation would delay quarantine and dispatch on every other server.
         """
-        self.store.invalidate_policy(candidate.binding)
+        binding = decision_binding(candidate, detector)
+        self.store.invalidate_policy(binding)
         self._policy, self._detector = candidate, detector
         self._policy_path = path
         for session in self._sessions:
-            session.policy_revision = candidate.binding
+            session.policy_revision = binding
 
     def reset_review_retries(self, server_id: str | None = None) -> None:
         """Explicitly re-arm automatic assessment after its retry budget was used up.

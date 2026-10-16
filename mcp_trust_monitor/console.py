@@ -113,7 +113,7 @@ class ConsoleBackend:
             health = await _resolve(health())
         return {"servers": servers, "events": _jsonable(events[-TIMELINE_LIMIT:]),
                 "event_count": len(events), "policy": _jsonable(policy),
-                "policy_binding": getattr(policy, "binding", None),
+                "policy_binding": self._active_binding(),
                 "audit": _jsonable(store.outbox_status()), "memory": memory,
                 "monitor_health": _jsonable(health),
                 "scope": "Only calls through this managed client are protected. Metadata does not prove executable code safe."}
@@ -173,16 +173,22 @@ class ConsoleBackend:
             return await self.memory.publish(lesson_id, self.publication_backend, actor=actor)
         raise ValueError("Unknown console action")
 
+    def _active_binding(self) -> str | None:
+        """The decision binding approvals bind: policy plus detector (REQ-DEC-06)."""
+        binding = getattr(self.monitor, "decision_binding", None)
+        return binding if isinstance(binding, str) else getattr(self.monitor.policy, "binding", None)
+
     def _check_reviewed_context(self, server_id: str, payload: Mapping[str, Any]) -> None:
         """Refuse an approve/restore whose reviewed policy or launch identity is stale.
 
         Revision and generation are checked by the SDK under the server lock. A real
-        policy change or launch-identity change also advances the generation, so these
-        checks are an early, explicit refusal of the reviewed context (REQ-TRU-02).
+        policy or detector change, or a launch-identity change, also advances the
+        generation, so these checks are an early, explicit refusal of the reviewed
+        context (REQ-TRU-02).
         """
         if "policy_binding" in payload:
             binding = payload["policy_binding"]
-            if not isinstance(binding, str) or binding != getattr(self.monitor.policy, "binding", None):
+            if not isinstance(binding, str) or binding != self._active_binding():
                 raise StaleDecisionError("the reviewed policy binding is no longer active")
         if "launch_identity" in payload:
             identity = payload["launch_identity"]

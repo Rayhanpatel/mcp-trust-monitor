@@ -23,6 +23,49 @@ class PolicyRef:
         return f"{self.policy_id}@{self.revision}#{self.digest}"
 
 
+# Approvals, generations and selection tokens bind the policy binding plus this
+# detector segment (REQ-TRU-02, REQ-DEC-06). Bindings written before the segment existed
+# never equal one that has it, so either binary treats the other's decisions as a
+# genuine change and fails closed.
+DETECTOR_SEGMENT = "|detector="
+DETECTOR_DISABLED = "disabled"
+
+
+def decision_binding(policy: PolicyRef, detector: object | None) -> str:
+    """The decision context approvals, generations and selection tokens are bound to.
+
+    The policy binding plus the active detector's identity, or `disabled`. Changing the
+    policy document, the declared rules, their mapping or scanned fields, or enabling or
+    disabling detection, is a genuine change. Equal declarations are the same binding
+    wherever the rules file is stored. Raises `ConfigurationError` for a detector that
+    declares no rules digest, before anything is activated.
+    """
+    return policy.binding + DETECTOR_SEGMENT + _detector_identity(detector)
+
+
+def _detector_identity(detector: object | None) -> str:
+    if detector is None:
+        return DETECTOR_DISABLED
+    if isinstance(detector, DetectorBinding):
+        return detector.binding_digest
+    from .config import ConfigurationError
+    rules_digest = getattr(detector, "rules_digest", None)
+    if not isinstance(rules_digest, str) or not rules_digest:
+        raise ConfigurationError("a configured detector must declare its rules digest")
+    try:
+        declaration = {
+            "kind": f"{type(detector).__module__}.{type(detector).__qualname__}",
+            "policy_digest": getattr(detector, "policy_digest", None),
+            "rules_digest": rules_digest,
+            "rule_mapping": {str(key): str(value)
+                             for key, value in dict(getattr(detector, "rule_mapping", None) or {}).items()},
+            "scanned_fields": [str(field) for field in getattr(detector, "scanned_fields", None) or ()],
+        }
+        return digest(declaration)
+    except (TypeError, ValueError):
+        raise ConfigurationError("the configured detector declaration is not serializable") from None
+
+
 def load_policy(path: Path) -> PolicyRef:
     document = json.loads(Path(path).read_text(encoding="utf-8"))
     return PolicyRef(
@@ -51,6 +94,16 @@ class DetectorBinding:
         object.__setattr__(self, 'rules_path', Path(self.rules_path).resolve())
         object.__setattr__(self, 'rule_mapping', MappingProxyType(dict(self.rule_mapping)))
         object.__setattr__(self, 'scanned_fields', tuple(self.scanned_fields))
+
+    @property
+    def binding_digest(self) -> str:
+        """Digest of the declared policy/rules pair that decides hard-deny coverage.
+
+        The rules path is not part of it: equal content stored elsewhere is the same pair.
+        """
+        return digest({"policy_digest": self.policy_digest, "rules_digest": self.rules_digest,
+                       "rule_mapping": dict(self.rule_mapping),
+                       "scanned_fields": list(self.scanned_fields)})
 
     def validate(self, policy_path: Path) -> None:
         from .config import ConfigurationError

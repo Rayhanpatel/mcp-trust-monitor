@@ -297,6 +297,9 @@ class TrustStore:
     def invalidate_policy(self, policy_binding: str) -> None:
         """Activate `policy_binding` for this client scope (REQ-TRU-02, REQ-TRU-03).
 
+        The owner passes its decision binding: the policy binding plus the detector
+        binding (REQ-DEC-06), so a detector-only change is a genuine change here.
+
         Approvals bound to another policy move to pending review. On a genuine policy
         change, every other record's generation also advances, with its state unchanged
         (quarantine stays quarantined) and a `decision_context_invalidated` event, so an

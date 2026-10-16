@@ -211,7 +211,7 @@ async def test_policy_reload_cannot_commit_between_final_gate_and_enqueue(tmp_pa
     replacement.write_text(json.dumps(document))
     async with TrustMonitor(config) as monitor:
         await approve(monitor, "custom/local")
-        active = monitor.policy.binding
+        active = monitor.decision_binding
         at_enqueue = []
         original_nowait = MemoryObjectSendStream.send_nowait
 
@@ -220,7 +220,7 @@ async def test_policy_reload_cannot_commit_between_final_gate_and_enqueue(tmp_pa
             if getattr(root, "method", None) == "tools/call":
                 record = monitor.status("custom/local")
                 at_enqueue.append((record.state, record.approved_policy_revision,
-                                   monitor.policy.binding))
+                                   monitor.decision_binding))
             return original_nowait(stream, item)
 
         monkeypatch.setattr(MemoryObjectSendStream, "send_nowait", probe)
@@ -239,7 +239,7 @@ async def test_policy_reload_cannot_commit_between_final_gate_and_enqueue(tmp_pa
         assert not result.isError
         # The call entered the transport while its authorization was still current.
         assert at_enqueue == [(TrustState.APPROVED, active, active)]
-        assert monitor.policy.binding != active
+        assert monitor.decision_binding != active
         assert monitor.status("custom/local").state is TrustState.PENDING_REVIEW
         with pytest.raises(CallBlocked):
             await monitor.call_tool("custom/local", "effect")

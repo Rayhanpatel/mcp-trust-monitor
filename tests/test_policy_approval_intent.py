@@ -83,9 +83,9 @@ async def test_policy_reload_makes_every_prepared_intent_stale(tmp_path, state):
                            " Additional operator review is required.")
     async with TrustMonitor(config) as monitor:
         prepared = await prepare(monitor, state, definition)
-        before = monitor.policy.binding
+        before = monitor.decision_binding
         await monitor.reload_policy(changed)
-        assert monitor.policy.binding != before
+        assert monitor.decision_binding != before
         after = monitor.status(SERVER)
         assert after.generation > prepared.generation
         expected = TrustState.PENDING_REVIEW if state == "approved" else prepared.state
@@ -95,7 +95,7 @@ async def test_policy_reload_makes_every_prepared_intent_stale(tmp_path, state):
             assert event["generation"] == after.generation
             assert event["from_state"] == event["to_state"] == state
             assert event["detail"]["previous_policy_binding"] == before
-            assert event["detail"]["policy_binding"] == monitor.policy.binding
+            assert event["detail"]["policy_binding"] == monitor.decision_binding
         with pytest.raises(StaleDecisionError):
             await act(monitor, prepared)
         assert monitor.status(SERVER).generation == after.generation
@@ -111,7 +111,7 @@ async def test_policy_reload_makes_every_prepared_intent_stale(tmp_path, state):
         else:
             granted = await monitor.approve(SERVER, revision=after.observed_revision,
                                             expected_generation=after.generation, actor="re-reviewed")
-        assert granted.approved_policy_revision == monitor.policy.binding
+        assert granted.approved_policy_revision == monitor.decision_binding
         response = await monitor.call_tool(SERVER, "effect")
         assert not response.isError
         assert call_count(calls) == 1
@@ -145,7 +145,7 @@ async def test_reopen_with_unchanged_policy_keeps_generations(tmp_path):
             assert monitor.status(SERVER).generation == prepared.generation
             assert decision_events(monitor) == []
             assert [event["detail"]["policy_binding"] for event in monitor.events(SERVER)
-                    if event["event_type"] == "policy_reloaded"] == [monitor.policy.binding]
+                    if event["event_type"] == "policy_reloaded"] == [monitor.decision_binding]
     async with TrustMonitor(config) as monitor:
         await monitor.observe(SERVER)
         await act(monitor, prepared, actor="unchanged-policy-reopen")
@@ -157,12 +157,12 @@ async def test_reopen_with_a_different_policy_is_a_genuine_change(tmp_path, stat
     config, definition, calls = environment(tmp_path)
     async with TrustMonitor(config) as monitor:
         prepared = await prepare(monitor, state, definition)
-        original = monitor.policy.binding
+        original = monitor.decision_binding
     other = write_policy(tmp_path / "policy-b.json", "reopened-policy", " Reopened under B.")
     changed = MonitorConfig(config.state_dir, other, config.servers,
                             poll_interval=60, timeout_seconds=30)
     async with TrustMonitor(changed) as monitor:
-        assert monitor.policy.binding != original
+        assert monitor.decision_binding != original
         after = monitor.status(SERVER)
         assert after.generation > prepared.generation
         assert after.state is prepared.state
