@@ -12,6 +12,7 @@ tool call was made) and local fake detectors whose scans block on an event.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import sys
 import threading
 from pathlib import Path
@@ -215,5 +216,29 @@ async def test_an_attempt_running_across_a_reset_is_not_charged_to_the_reset_bud
         else:  # an equal declaration or a reset changes no trust state
             assert current.state is TrustState.APPROVED
             assert current.generation == approved.generation
+        await monitor.stop_monitor()
+    assert not calls.exists()
+
+
+@pytest.mark.parametrize("case", ["reload_and_return", "operator_reset"])
+async def test_the_current_context_is_rescheduled_without_waiting_for_a_poll(tmp_path, case):
+    """Follow-up review nit: with a poll interval far longer than the test, only the
+    prompt notification after a superseded attempt can schedule the next attempt."""
+    first = Detector("1", blocked=True, outcome="fail" if case == "operator_reset" else "clean")
+    config, calls = environment(tmp_path, first)
+    config = dataclasses.replace(config, poll_interval=60)
+    async with TrustMonitor(config) as monitor:
+        await approve(monitor)
+        await monitor.start_monitor()
+        await until(first.started.is_set, "the first scan to start")
+        if case == "reload_and_return":
+            await monitor.reload_policy(POLICY, Detector("2"))
+            await monitor.reload_policy(POLICY, first)
+        else:
+            monitor.reset_review_retries(SERVER)
+        released = asyncio.get_running_loop().time()
+        first.release.set()
+        await until(lambda: first.calls == 2, "the rescheduled attempt")
+        assert asyncio.get_running_loop().time() - released < 5  # far sooner than a poll
         await monitor.stop_monitor()
     assert not calls.exists()

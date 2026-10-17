@@ -4,21 +4,36 @@ A Python library that keeps MCP tool approval tied to the metadata an operator
 reviewed. When the monitor observes changed tool definitions, calls through
 the managed client stop until the new revision is reviewed and approved.
 
-**Version 0.2.0a1 is an alpha for local stdio servers.** It provides an owning async
-SDK, a CLI, background monitoring, a local operator console, and decision-record
-export. Optional Semgrep, OpenAI, Senso and ClickHouse adapters add policy checks,
-review recommendations, reviewed precedents and audit delivery. Memory is off by
-default.
+**Version 0.2.0a2 is a corrective alpha for local stdio servers.** It provides an
+owning async SDK, a CLI, background monitoring, a local operator console, and
+decision-record export. Optional Semgrep, OpenAI, Senso and ClickHouse adapters add
+policy checks, review recommendations, reviewed precedents and audit delivery.
+Memory is off by default.
+
+**Upgrading from 0.2.0a1.** 0.2.0a2 fixes four defects:
+
+- **Launch identity.** A server whose executable symlink was retargeted during
+  startup or observation could receive calls under an approval recorded for the
+  new target.
+- **Detector changes.** A detector-only change did not invalidate approvals or
+  selection tokens.
+- **Optional descriptions.** A tool without a description failed model review.
+- **Export provenance.** Failed assessments exported no returned policy sources.
+
+The first time 0.2.0a2 opens an existing state directory, approved servers return
+to pending review once and quarantine is kept. Observe and approve them again. See
+the [handoff](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/HANDOFF.md)
+and the [compatibility notes](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/LIBRARY.md#persistence-and-compatibility).
 
 ## Install
 
 Use Python 3.10 or 3.12 on macOS or Linux. Download the wheel and `SHA256SUMS` from
-[the versioned GitHub release](https://github.com/Rayhanpatel/mcp-trust-monitor/releases/tag/v0.2.0a1),
+[the versioned GitHub release](https://github.com/Rayhanpatel/mcp-trust-monitor/releases/tag/v0.2.0a2),
 verify its checksum, and install into your application's environment:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install ./mcp_trust_monitor-0.2.0a1-py3-none-any.whl
+.venv/bin/python -m pip install ./mcp_trust_monitor-0.2.0a2-py3-none-any.whl
 .venv/bin/mcp-trust-monitor --help
 ```
 
@@ -87,9 +102,10 @@ eligibility. It is optional and has no authority to approve calls.
 
 ## Verification and evidence
 
-The repaired runtime passed 570 tests on each of Python 3.10/3.12 across local
-macOS ARM64 and Linux ARM64, plus installed-wheel, typing and real filesystem-server
-checks. The [CI workflow](https://github.com/Rayhanpatel/mcp-trust-monitor/actions/workflows/ci.yml)
+The 0.2.0a2 code passed 643 tests on each of Python 3.10/3.12 across local macOS
+ARM64 and Linux ARM64, plus installed-wheel, typing and cross-version state checks.
+Every repaired defect has regression tests that fail on the 0.2.0a1 code. The
+[CI workflow](https://github.com/Rayhanpatel/mcp-trust-monitor/actions/workflows/ci.yml)
 checks the release source on hosted Linux AMD64 and macOS ARM64. Exact hosted
 results and artifact hashes belong to the release's verification record.
 
