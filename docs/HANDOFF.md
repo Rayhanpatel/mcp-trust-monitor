@@ -51,6 +51,14 @@ regression tests that fail on 0.2.0a1 and pass on the candidate:
 - **D4 failure provenance.** Failed and stale assessment exports keep returned
   policy source IDs and memory `enabled`/`status`, still pseudonymized.
 
+A follow-up review (17 October) found that automatic review still keyed its retry
+budget on the policy alone. When a different detector was reloaded while the old
+detector's scan was still running, that stale scan could use up the new detector's
+attempts, so the new detector never ran automatically. The budget now uses the
+activated decision binding. A result is not charged if its context was superseded
+while it ran, or if its budget was reset meanwhile by a reload or an explicit
+reset; a per-server reset epoch covers the case where the key is equal again.
+
 Upgrading a 0.2.0a1 state directory fails closed once: approvals return to pending
 review, generations advance and quarantine is preserved. An earlier binary opening
 upgraded state also returns 0.2.0a2 approvals to pending review. There is no store
@@ -63,6 +71,9 @@ Known limits and follow-ups:
   observed again or closed.
 - The export does not yet carry a separate detector-binding digest.
 - Invalid description types are refused only after scoped policy retrieval.
+- After a superseded review attempt, the current context is rescheduled
+  immediately. The tests prove that it runs, but not that it runs before the next
+  poll.
 
 Current store schema is 4; export schema is 2. Older binaries that only support
 store schema 3 refuse upgraded stores. Back up a stopped state directory and use
@@ -70,7 +81,7 @@ a compatible backup for downgrades.
 
 ## Verification
 
-The 0.2.0a2 candidate code passed **637 tests in each of four local runs**: macOS
+The 0.2.0a2 candidate code passed **643 tests in each of four local runs**: macOS
 ARM64 and Linux ARM64 (unprivileged), each on Python 3.10 and 3.12. The 0.2.0a1
 code fails the new regression tests for the defect reasons. Installed-wheel,
 typing and cross-version state checks passed. An independent review was resolved

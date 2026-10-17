@@ -195,8 +195,16 @@ The monitor coalesces observations per server, so a slow or continuously
 notifying server occupies at most one of `max_concurrency` workers; with a single
 worker, other servers wait for it. Automatic assessment of an unchanged failed or
 stale context backs off from the poll interval and stops after
-`review_max_attempts` (default 3); a changed revision, launch identity or policy,
-or `reset_review_retries()`, re-arms it, and observation continues meanwhile.
+`review_max_attempts` (default 3); a changed revision, launch identity or decision
+binding (policy or detector), or `reset_review_retries()`, re-arms it, and
+observation continues meanwhile. An assessment that was still running when its
+context changed or its budget was reset is not counted against the current
+budget, and the current context is assessed promptly. Every policy or detector
+reload resets the budget. Examples include a scan still running when a different
+detector is activated, or when `reset_review_retries()` is called. Each such skip
+needs a reset or a context change, so retries stay bounded. The
+`assessment_retries_exhausted` event's `policy_binding` field records the decision
+binding.
 `AssessmentNotReady` means no current session observation exists to assess yet.
 
 ## CLI and local console

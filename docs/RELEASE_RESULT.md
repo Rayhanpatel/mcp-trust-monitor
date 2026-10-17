@@ -8,21 +8,25 @@ and [SPEC.md](SPEC.md).
 
 ## 0.2.0a2 corrective candidate validation (16 October 2026, unpublished)
 
-The candidate repairs four defects found in 0.2.0a1; see [HANDOFF.md](HANDOFF.md).
+The candidate repairs four defects found in 0.2.0a1 and one follow-up scheduling
+race; see [HANDOFF.md](HANDOFF.md).
 These results come from local runs of the candidate code. They are not hosted CI,
 and they are not validated by the historical live results or the 0.2.0a1 hosted
 runs below.
 
 The full suite ran from a clean git archive of the candidate code, with
 `MTM_REQUIRE_NODE=1` and no cloud credential variables present. It passed
-**637 tests in each run**:
+**643 tests in each run**:
 
 | Environment | Python | Result |
 | --- | --- | --- |
-| macOS ARM64 | 3.10.22 | 637 passed, no skips |
-| macOS ARM64 | 3.12.7 | 637 passed, no skips |
-| Linux ARM64, unprivileged container user | 3.10.22 | 637 passed, no skips |
-| Linux ARM64, unprivileged container user | 3.12.15 | 637 passed, no skips |
+| macOS ARM64 | 3.10.22 | 643 passed, no skips |
+| macOS ARM64 | 3.12.7 | 643 passed, no skips |
+| Linux ARM64, unprivileged container user | 3.10.22 | 643 passed, no skips |
+| Linux ARM64, unprivileged container user | 3.12.15 | 643 passed, no skips |
+
+The earlier candidate without the scheduling follow-up passed 637 tests on the
+same four environments.
 
 **Pre-repair reproduction.** Each defect was reproduced against the 0.2.0a1 code,
 using temporary synthetic state and real stdio servers that log received calls:
@@ -46,6 +50,24 @@ library code. 53 fail there for the defect reasons. The other 24 pass on both
 versions; they deliberately guard unchanged behavior, such as identical-binding
 no-ops, an unchanged virtualenv interpreter symlink, invalid description types
 and successful export records.
+
+**Follow-up: review scheduling after a detector reload (17 October).** On the earlier
+candidate, a detector was reloaded while the old detector's scan was still running,
+with `review_max_attempts=1`. The new detector scanned 0 times: the stale old scan
+used up its budget (`retries_exhausted`), and no automatic review followed. A scan
+that had already finished before the reload was unaffected. The six tests in
+`tests/test_detector_reload_scheduling.py` all fail on the earlier candidate.
+They use a real stdio server and blocked local fake detectors. After the repair:
+
+- the new detector runs automatically, without a manual reset;
+- a new hard denial quarantines, and an earlier quarantine is preserved;
+- approval invalidation is unchanged;
+- the new context keeps its single bounded attempt;
+- attempts running across a reload back to the same pair, an equal-declaration
+  reload or an explicit reset are not charged to the re-armed budget.
+
+Mutation checks confirmed that reverting either part of the repair fails the tests.
+The provided reproduction also passed from the installed wheel.
 
 **Installed artifacts.** A wheel and source archive were built from a clean
 archive of the candidate. The installed wheel was then checked outside the
