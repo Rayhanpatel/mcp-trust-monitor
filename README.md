@@ -102,7 +102,7 @@ eligibility. It is optional and has no authority to approve calls.
 
 ## Verification and evidence
 
-The 0.2.0a2 code passed 643 tests on each of Python 3.10/3.12 across local macOS
+The 0.2.0a2 code passed 645 tests on each of Python 3.10/3.12 across local macOS
 ARM64 and Linux ARM64, plus installed-wheel, typing and cross-version state checks.
 Every repaired defect has regression tests that fail on the 0.2.0a1 code. The
 [CI workflow](https://github.com/Rayhanpatel/mcp-trust-monitor/actions/workflows/ci.yml)

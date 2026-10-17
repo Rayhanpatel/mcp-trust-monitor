@@ -1,7 +1,7 @@
 # Library requirement and evidence map
 
-Updated 16 October 2026 for the unpublished `0.2.0a2` corrective alpha candidate
-(the public release is `0.2.0a1`). [SPEC.md](SPEC.md) remains authoritative. The map distinguishes implemented behavior, executable tests and
+Updated 17 October 2026 for the `0.2.0a2` corrective alpha, which supersedes
+`0.2.0a1`. [SPEC.md](SPEC.md) remains authoritative. The map distinguishes implemented behavior, executable tests and
 historical private live evidence. It does not claim production readiness or that
 an earlier cloud result validates every subsequent repair.
 

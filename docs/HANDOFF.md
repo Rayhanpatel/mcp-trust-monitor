@@ -1,7 +1,7 @@
 # MCP Trust Monitor alpha release handoff
 
-Version: **0.2.0a2 corrective alpha candidate** (unpublished; the public release is
-0.2.0a1). The public release was prepared from the independently reviewed local
+Version: **0.2.0a2**, a corrective alpha that supersedes 0.2.0a1. The public
+release was prepared from the independently reviewed local
 runtime and the existing public hackathon history. Private approval records and
 raw provider evidence are retained locally and excluded from this public tree.
 
@@ -29,11 +29,11 @@ The local repair series independently verified these behaviors before publicatio
 - Export identifiers use scoped keyed pseudonyms, including UUID-shaped inputs.
 - Eligible verdict assessments are independent of the bounded display timeline.
 
-## Corrective alpha repairs (16 October 2026, unpublished candidate)
+## Corrective alpha repairs (16–17 October 2026)
 
 A post-release review of 0.2.0a1 found four defects. Each was reproduced against
 the 0.2.0a1 code with temporary synthetic state before repair, and each has
-regression tests that fail on 0.2.0a1 and pass on the candidate:
+regression tests that fail on 0.2.0a1 and pass on 0.2.0a2:
 
 - **D1 launch identity.** A session is bound to the launch identity captured
   before its process started. An identity change during startup or observation is
@@ -81,12 +81,13 @@ a compatible backup for downgrades.
 
 ## Verification
 
-The 0.2.0a2 candidate code passed **643 tests in each of four local runs**: macOS
+The 0.2.0a2 code passed **645 tests in each of four local runs**: macOS
 ARM64 and Linux ARM64 (unprivileged), each on Python 3.10 and 3.12. The 0.2.0a1
 code fails the new regression tests for the defect reasons. Installed-wheel,
 typing and cross-version state checks passed. An independent review was resolved
-to a final verdict of ready. Hosted CI has not run on the candidate. See
-[RELEASE_RESULT.md](RELEASE_RESULT.md) for the exact results.
+to a final verdict of ready. Hosted CI runs on the exact release commit; the
+versioned GitHub release links those runs and its `SHA256SUMS`. See
+[RELEASE_RESULT.md](RELEASE_RESULT.md) for the exact local results.
 
 The 0.2.0a1 runtime passed **570 tests in each of four local runs**: Python 3.10
 and 3.12 on macOS ARM64 and Linux ARM64. Regression tests

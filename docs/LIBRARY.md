@@ -1,4 +1,4 @@
-# Library guide: 0.2.0a2 corrective alpha candidate
+# Library guide: 0.2.0a2 alpha
 
 MCP Trust Monitor owns a set of explicitly configured local stdio MCP sessions.
 It exposes only approved, fresh tool definitions and checks durable trust again
@@ -379,7 +379,7 @@ open. Binaries that support only version 3 (including the earlier `6e21602` and
 `8f74a74` candidates) refuse an upgraded store, so keep a backup if you may need
 them.
 
-**Compatibility (0.2.0a2 corrective candidate).** Earlier releases, including the
+**Compatibility (0.2.0a2).** Earlier releases, including the
 published 0.2.0a1, bound approvals to the policy alone and did not record which
 detector was active. The first owning open by 0.2.0a2 therefore counts as a genuine
 decision-context change, with or without a detector: approved servers return to

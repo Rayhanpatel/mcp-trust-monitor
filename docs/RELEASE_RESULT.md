@@ -1,4 +1,4 @@
-# MCP Trust Monitor alpha verification: 0.2.0a1 release and 0.2.0a2 candidate
+# MCP Trust Monitor alpha verification: 0.2.0a2 and 0.2.0a1
 
 This is a bounded **local stdio Python alpha**. Its public SDK, CLI, monitor,
 operator console and optional adapters are implemented. It is not a claim of
@@ -6,27 +6,27 @@ production readiness, general prompt-injection protection or arbitrary executabl
 safety. Runtime behavior and requirements are documented in [LIBRARY.md](LIBRARY.md)
 and [SPEC.md](SPEC.md).
 
-## 0.2.0a2 corrective candidate validation (16 October 2026, unpublished)
+## 0.2.0a2 corrective alpha validation (16–17 October 2026)
 
-The candidate repairs four defects found in 0.2.0a1 and one follow-up scheduling
-race; see [HANDOFF.md](HANDOFF.md).
-These results come from local runs of the candidate code. They are not hosted CI,
+0.2.0a2 repairs four defects found in 0.2.0a1 and one follow-up scheduling race;
+see [HANDOFF.md](HANDOFF.md). These results come from local runs of the 0.2.0a2
+code. They are not hosted CI,
 and they are not validated by the historical live results or the 0.2.0a1 hosted
 runs below.
 
-The full suite ran from a clean git archive of the candidate code, with
+The full suite ran from a clean git archive of the 0.2.0a2 code, with
 `MTM_REQUIRE_NODE=1` and no cloud credential variables present. It passed
-**643 tests in each run**:
+**645 tests in each run**:
 
 | Environment | Python | Result |
 | --- | --- | --- |
-| macOS ARM64 | 3.10.22 | 643 passed, no skips |
-| macOS ARM64 | 3.12.7 | 643 passed, no skips |
-| Linux ARM64, unprivileged container user | 3.10.22 | 643 passed, no skips |
-| Linux ARM64, unprivileged container user | 3.12.15 | 643 passed, no skips |
+| macOS ARM64 | 3.10.22 | 645 passed, no skips |
+| macOS ARM64 | 3.12.7 | 645 passed, no skips |
+| Linux ARM64, unprivileged container user | 3.10.22 | 645 passed, no skips |
+| Linux ARM64, unprivileged container user | 3.12.15 | 645 passed, no skips |
 
-The earlier candidate without the scheduling follow-up passed 637 tests on the
-same four environments.
+Before the scheduling follow-up, the repaired code passed 637 tests on the same
+four environments.
 
 **Pre-repair reproduction.** Each defect was reproduced against the 0.2.0a1 code,
 using temporary synthetic state and real stdio servers that log received calls:
@@ -43,7 +43,7 @@ using temporary synthetic state and real stdio servers that log received calls:
 - **D4:** a model failure after successful policy retrieval exported
   `returned_content_ids: null`.
 
-On the candidate, from the source tree and from the installed wheel, every one of
+On 0.2.0a2, from the source tree and from the installed wheel, every one of
 these is refused or corrected, and the logs record no unintended call. The 77 tests
 in the five new or extended regression files were also run against the 0.2.0a1
 library code. 53 fail there for the defect reasons. The other 24 pass on both
@@ -51,12 +51,13 @@ versions; they deliberately guard unchanged behavior, such as identical-binding
 no-ops, an unchanged virtualenv interpreter symlink, invalid description types
 and successful export records.
 
-**Follow-up: review scheduling after a detector reload (17 October).** On the earlier
-candidate, a detector was reloaded while the old detector's scan was still running,
+**Follow-up: review scheduling after a detector reload (17 October).** On the repaired
+code before this follow-up, a detector was reloaded while the old detector's scan was still running,
 with `review_max_attempts=1`. The new detector scanned 0 times: the stale old scan
 used up its budget (`retries_exhausted`), and no automatic review followed. A scan
 that had already finished before the reload was unaffected. The six tests in
-`tests/test_detector_reload_scheduling.py` all fail on the earlier candidate.
+`tests/test_detector_reload_scheduling.py` fail on that code; two further tests
+check prompt rescheduling.
 They use a real stdio server and blocked local fake detectors. After the repair:
 
 - the new detector runs automatically, without a manual reset;
@@ -70,7 +71,7 @@ Mutation checks confirmed that reverting either part of the repair fails the tes
 The provided reproduction also passed from the installed wheel.
 
 **Installed artifacts.** A wheel and source archive were built from a clean
-archive of the candidate. The installed wheel was then checked outside the
+archive of the 0.2.0a2 code. The installed wheel was then checked outside the
 checkout with core-only dependencies, on Python 3.10 and 3.12. These checks passed:
 
 - public API and packaged resources;
@@ -85,15 +86,15 @@ Artifact checksums are recorded with the local evidence rather than in this tree
 because the source archive contains this file.
 
 **Cross-version state.** One synthetic state directory was owned in turn by the
-0.2.0a1 code and the candidate, over real stdio:
+0.2.0a1 code and the 0.2.0a2 code, over real stdio:
 
 1. Under 0.2.0a1, an approval was created and survived a restart.
-2. The first candidate open returned it to pending review. Generations advanced,
+2. The first 0.2.0a2 open returned it to pending review. Generations advanced,
    the quarantined server stayed quarantined, and the call was refused until the
    server was re-approved.
-3. An unchanged candidate reopen changed nothing.
-4. A detector change under the candidate reset approval again.
-5. 0.2.0a1 then opened the upgraded state without error, returned the candidate's
+3. An unchanged 0.2.0a2 reopen changed nothing.
+4. A detector change under 0.2.0a2 reset approval again.
+5. 0.2.0a1 then opened the upgraded state without error, returned the 0.2.0a2
    approval to pending review and refused the call. The server log did not move.
 
 The store stayed at schema 4 throughout.
@@ -109,13 +110,15 @@ before these runs:
 
 The final verdict was ready. Deferred follow-ups are listed in HANDOFF.md.
 
-Not done for the candidate:
+Hosted CI on Linux AMD64 and macOS ARM64, Python 3.10/3.12, runs on the exact
+release commit. The versioned GitHub release links those runs, and its `SHA256SUMS`
+lists the published artifacts; local runs are not a substitute for them.
 
-- hosted CI on Linux AMD64 and macOS;
+Not done for 0.2.0a2:
+
 - Windows;
 - any live OpenAI, Senso or ClickHouse call;
-- reruns of frozen evaluations;
-- publication.
+- reruns of frozen evaluations.
 
 ## 0.2.0a1 release validation
 
