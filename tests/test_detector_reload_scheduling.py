@@ -172,3 +172,48 @@ async def test_the_new_context_keeps_its_own_bounded_retry_budget(tmp_path):
         await until(lambda: new.calls == 2, "the re-armed attempt")
         await monitor.stop_monitor()
     assert not calls.exists()
+
+
+@pytest.mark.parametrize("case", ["reload_and_return", "equal_declaration", "operator_reset"])
+async def test_an_attempt_running_across_a_reset_is_not_charged_to_the_reset_budget(tmp_path, case):
+    """Follow-up review: the scheduling key alone cannot tell an attempt that began before
+    a reload or explicit reset from one that began after it when the key is equal again
+    (D1→D2→D1, an equal new declaration, or `reset_review_retries` itself). The attempt
+    that ran across the reset must not use the budget that reset re-armed."""
+    first = Detector("1", blocked=True, outcome="fail" if case == "operator_reset" else "clean")
+    config, calls = environment(tmp_path, first)
+    async with TrustMonitor(config) as monitor:
+        approved = await approve(monitor)
+        await monitor.start_monitor()
+        await until(first.started.is_set, "the first scan to start")
+        replacement = first
+        if case == "reload_and_return":
+            await monitor.reload_policy(POLICY, Detector("2"))
+            await monitor.reload_policy(POLICY, first)
+        elif case == "equal_declaration":
+            replacement = Detector("1")
+            await monitor.reload_policy(POLICY, replacement)
+        else:
+            monitor.reset_review_retries(SERVER)
+        first.release.set()
+        if case == "operator_reset":
+            # One uncharged attempt before the reset, then exactly one bounded attempt.
+            await until(lambda: events(monitor, "assessment_retries_exhausted"), "the re-armed attempt")
+            await asyncio.sleep(8 * POLL)
+            assert first.calls == 2
+            assert len(events(monitor, "detector_failed")) == 2
+            assert len(events(monitor, "assessment_retries_exhausted")) == 1
+        else:
+            await until(lambda: replacement.calls >= (2 if replacement is first else 1)
+                        and clean_scans_by(monitor, replacement), "the current detector's scan")
+            assert events(monitor, "assessment_retries_exhausted") == []
+            assert "@review:" + SERVER not in monitor.health()["errors"]
+        current = monitor.status(SERVER)
+        if case == "reload_and_return":  # a genuine change, even though the pair returned
+            assert current.state is TrustState.PENDING_REVIEW
+            assert current.generation > approved.generation
+        else:  # an equal declaration or a reset changes no trust state
+            assert current.state is TrustState.APPROVED
+            assert current.generation == approved.generation
+        await monitor.stop_monitor()
+    assert not calls.exists()

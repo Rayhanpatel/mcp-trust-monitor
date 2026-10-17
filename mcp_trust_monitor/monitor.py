@@ -10,8 +10,11 @@ Automatic assessment of an unchanged context (revision, launch identity and the
 activated policy/detector decision binding) that failed or went stale is retried with
 exponential backoff from the poll interval, at most `review_max_attempts` times. A
 changed context or an explicit `reset_review_retries` re-arms it. An assessment whose
-context changed while it ran is not an attempt of any current context: it uses no
-budget, and the new context is scheduled promptly (REQ-DEC-06). Metadata observation is never suppressed (REQ-MON-02,
+context changed while it ran, or that was still running when the budget was reset
+(every policy or detector reload resets it), is not an attempt of the current
+budget: it uses none of it, and the current context is scheduled promptly
+(REQ-DEC-06). Each such skip needs a context change or a reset, so retries stay
+bounded. Metadata observation is never suppressed (REQ-MON-02,
 REQ-ENF-08).
 
 Lifecycle (REQ-MON-03). `start` and `stop` are serialized. Every task the scheduler
@@ -63,6 +66,8 @@ class MonitorLoop:
         self.last_reviewed = {}
         self.review_tasks = {}
         self.review_budgets: dict[str, _ReviewBudget] = {}
+        # Advanced by every budget reset; an attempt that started before it is not charged.
+        self.review_epochs: dict[str, int] = {}
         self._assessment_slots = asyncio.Semaphore(owner.config.max_concurrency)
 
     def notify(self, server_id):
@@ -81,18 +86,24 @@ class MonitorLoop:
         for sid in targets:
             self.review_budgets.pop(sid, None)
             self.errors.pop('@review:' + sid, None)
+            self.review_epochs[sid] = self.review_epochs.get(sid, 0) + 1
 
     def _review_key(self, record):
         # The decision binding, not the policy alone: a detector reload under an unchanged
         # policy is a new context with its own budget (REQ-MON-02, REQ-DEC-06).
         return (record.observed_revision, record.launch_identity, self.owner.decision_binding)
 
-    def _charge(self, sid, key, outcome):
-        """Count a failed or stale attempt, unless its context was superseded meanwhile."""
+    def _superseded(self, sid, key, epoch):
+        """The attempt's context changed, or its budget was reset, while it ran."""
         current = self.owner.status(sid)
-        if current is not None and self._review_key(current) != key:
-            return  # The finally block of `_assess` reschedules the current context.
-        self._review_failed(sid, key, outcome)
+        return (self.review_epochs.get(sid, 0) != epoch
+                or (current is not None and self._review_key(current) != key))
+
+    def _charge(self, sid, key, epoch, outcome):
+        """Count a failed or stale attempt, unless it was superseded while it ran; the
+        finally block of `_assess` then reschedules the current context."""
+        if not self._superseded(sid, key, epoch):
+            self._review_failed(sid, key, outcome)
 
     def _review_due(self, sid, key):
         budget = self.review_budgets.get(sid)
@@ -262,11 +273,12 @@ class MonitorLoop:
 
     async def _assess(self, sid, generation):
         from .sdk import AssessmentNotReady
-        key = None
+        key = epoch = None
         try:
             async with self._assessment_slots:
                 # Observation work has separate workers and remains live throughout I/O.
                 key = self._review_key(self.owner.status(sid))
+                epoch = self.review_epochs.get(sid, 0)
                 try:
                     # A session that is mid-refresh is not ready; that is not an attempt
                     # and uses no retry budget. The next completed observation reschedules.
@@ -281,21 +293,21 @@ class MonitorLoop:
                     self.review_budgets.pop(sid, None)
                     self.errors.pop('@review:' + sid, None)
                 else:
-                    self._charge(sid, key, result.outcome)
+                    self._charge(sid, key, epoch, result.outcome)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if key is not None and not self._owner_faulted():
-                self._charge(sid, key, type(exc).__name__)
+                self._charge(sid, key, epoch, type(exc).__name__)
             else:
                 self.errors['@review:' + sid] = type(exc).__name__
         finally:
             if self.review_tasks.get(sid) is asyncio.current_task():
                 del self.review_tasks[sid]
             if self._current(generation) and not self._owner_faulted() and key is not None:
-                current = self.owner.status(sid)
-                # Polling schedules bounded retries. A changed context refreshes promptly.
-                if current and self._review_key(current) != key:
+                # Polling schedules bounded retries. A changed context, or a budget reset
+                # while this attempt ran, refreshes promptly.
+                if self.owner.status(sid) and self._superseded(sid, key, epoch):
                     self.notify(sid)
 
     async def _deliver(self, generation):
