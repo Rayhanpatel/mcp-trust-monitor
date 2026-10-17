@@ -6,10 +6,12 @@ observation requested by notifications that arrived meanwhile (REQ-MON-01). A sl
 continuously notifying server therefore occupies at most one worker and cannot starve
 unrelated servers (REQ-ENF-04).
 
-Automatic assessment of an unchanged context (revision, launch identity and policy)
-that failed or went stale is retried with exponential backoff from the poll interval,
-at most `review_max_attempts` times. A changed context or an explicit
-`reset_review_retries` re-arms it. Metadata observation is never suppressed (REQ-MON-02,
+Automatic assessment of an unchanged context (revision, launch identity and the
+activated policy/detector decision binding) that failed or went stale is retried with
+exponential backoff from the poll interval, at most `review_max_attempts` times. A
+changed context or an explicit `reset_review_retries` re-arms it. An assessment whose
+context changed while it ran is not an attempt of any current context: it uses no
+budget, and the new context is scheduled promptly (REQ-DEC-06). Metadata observation is never suppressed (REQ-MON-02,
 REQ-ENF-08).
 
 Lifecycle (REQ-MON-03). `start` and `stop` are serialized. Every task the scheduler
@@ -81,7 +83,16 @@ class MonitorLoop:
             self.errors.pop('@review:' + sid, None)
 
     def _review_key(self, record):
-        return (record.observed_revision, record.launch_identity, self.owner.policy.binding)
+        # The decision binding, not the policy alone: a detector reload under an unchanged
+        # policy is a new context with its own budget (REQ-MON-02, REQ-DEC-06).
+        return (record.observed_revision, record.launch_identity, self.owner.decision_binding)
+
+    def _charge(self, sid, key, outcome):
+        """Count a failed or stale attempt, unless its context was superseded meanwhile."""
+        current = self.owner.status(sid)
+        if current is not None and self._review_key(current) != key:
+            return  # The finally block of `_assess` reschedules the current context.
+        self._review_failed(sid, key, outcome)
 
     def _review_due(self, sid, key):
         budget = self.review_budgets.get(sid)
@@ -270,12 +281,12 @@ class MonitorLoop:
                     self.review_budgets.pop(sid, None)
                     self.errors.pop('@review:' + sid, None)
                 else:
-                    self._review_failed(sid, key, result.outcome)
+                    self._charge(sid, key, result.outcome)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             if key is not None and not self._owner_faulted():
-                self._review_failed(sid, key, type(exc).__name__)
+                self._charge(sid, key, type(exc).__name__)
             else:
                 self.errors['@review:' + sid] = type(exc).__name__
         finally:
