@@ -502,8 +502,9 @@ class TrustMonitor:
         """Explicitly re-arm automatic assessment after its retry budget was used up.
 
         The monitor bounds automatic assessment of an unchanged failed context
-        (`review_max_attempts`, REQ-MON-02). A changed revision, launch identity or policy
-        resets the budget by itself; this is the operator's manual reset. It never
+        (`review_max_attempts`, REQ-MON-02). A changed revision, launch identity or
+        decision binding (policy or detector) resets the budget by itself; this is the
+        operator's manual reset. It never
         approves anything; `review_once` remains available regardless of the budget.
         """
         if server_id is not None and server_id not in self.config.servers:
