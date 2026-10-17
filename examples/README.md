@@ -11,7 +11,7 @@ building or downloading the reviewed wheel:
 mtm_example_dir=$(mktemp -d)
 cp examples/installed_consumer.py examples/external_stdio_server.py "$mtm_example_dir/"
 python3 -m venv "$mtm_example_dir/venv"
-"$mtm_example_dir/venv/bin/python" -m pip install ./dist/mcp_trust_monitor-0.2.0a1-py3-none-any.whl
+"$mtm_example_dir/venv/bin/python" -m pip install ./dist/mcp_trust_monitor-0.2.0a2-py3-none-any.whl
 (cd "$mtm_example_dir" && ./venv/bin/python installed_consumer.py)
 ```
 
@@ -26,3 +26,13 @@ output includes `"installed_consumer": "passed"` and equal before/after counts o
 The example tests metadata-change enforcement, not malicious-code detection or
 process sandboxing. The sample server is deliberately instrumented and synthetic.
 It does not prove that arbitrary servers provide reliable received-call evidence.
+
+# Offline learning-loop walkthrough
+
+`learning_loop_offline.py` runs the human-reviewed memory loop described in
+[docs/SENSO_LEARNING_LOOP.md](../docs/SENSO_LEARNING_LOOP.md) from a source checkout:
+`uv sync --locked`, then `uv run python examples/learning_loop_offline.py`. It uses
+the real library and real stdio servers (`external_stdio_server.py`). Three labelled
+local stand-ins replace Senso lesson storage, Senso policy search and the model, so
+its output shows the library's local checks, not Senso or model behavior. No
+credential or network service is used.

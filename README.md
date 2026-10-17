@@ -100,6 +100,59 @@ Decision-record exports are pseudonymous, not anonymous. Memory requires human
 verdicts, exact-content approval, verified private publication and current local
 eligibility. It is optional and has no authority to approve calls.
 
+## Learning from reviewed cases (optional Senso memory)
+
+The optional model reviewer can draw on lessons that operators wrote about tool
+changes they have already judged. Senso stores the approved lessons privately and
+searches them. MCP Trust Monitor decides which lessons count and re-checks
+everything Senso returns.
+
+```text
+ ┌─────────────┐    ┌────────────┐    ┌───────────────────────────────┐
+ │ tool change │───▶│ assessment │───▶│ human verdict on the change   │
+ └─────────────┘    └────────────┘    └───────────────┬───────────────┘
+                          ▲                           ▼
+                          │           ┌───────────────────────────────┐
+                          │           │ operator-written lesson       │
+                          │           └───────────────┬───────────────┘
+                          │                           ▼
+                          │           ┌───────────────────────────────┐
+                          │           │ approval of the exact lesson  │
+                          │           │ content (its SHA-256 digest)  │
+                          │           └───────────────┬───────────────┘
+                          │ later review              ▼
+ ┌────────────────────────┴───────┐   ┌───────────────────────────────┐
+ │ scoped retrieval of approved   │◀──│ private Senso storage, active │
+ │ lessons in a LATER assessment  │   │ only after exact read-back    │
+ └────────────────────────────────┘   └───────────────────────────────┘
+ Tool approval (approve / restore) is a separate operator
+ decision outside this loop.
+```
+
+- **The loop:**
+  1. An operator records whether a reviewed change actually violated the policy
+     (violation, non-violation or uncertain), tied to the exact assessment they
+     reviewed.
+  2. They write a short lesson and approve its exact text.
+  3. Later assessments of other changes can retrieve and cite it.
+- **Before a lesson is relied on:**
+  - its stored copy must match the approved digest on read-back;
+  - it must belong to this monitor's memory scope and the current policy;
+  - changed or out-of-scope content fails that assessment;
+  - a revoked lesson is excluded at once, and an assessment still using it is
+    discarded as stale.
+- **Lessons never approve tools.** A changed tool runs again only after an operator
+  explicitly approves its new revision, with or without memory. Approving a lesson
+  makes its text eligible for retrieval; it does not make the lesson correct.
+- **Status:** optional and off by default. In the historical 12 October experiment
+  (before later repairs), eight synthetic cases were each run three times per mode.
+  Memory-on and memory-off both matched all 24 expected outcomes, so no accuracy
+  improvement was shown.
+
+Read the [learning-loop walkthrough](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/SENSO_LEARNING_LOOP.md).
+Or run the offline example from a source checkout, with local stand-ins and no keys:
+`uv sync --locked`, then `uv run python examples/learning_loop_offline.py`.
+
 ## Verification and evidence
 
 The 0.2.0a2 code passed 645 tests on each of Python 3.10/3.12 across local macOS
