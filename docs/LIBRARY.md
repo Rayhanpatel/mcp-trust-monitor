@@ -360,6 +360,10 @@ read-back. Unknown upload outcomes remain inactive and are never blindly retried
 `reconcile` names the candidate node explicitly. `revoke_lesson` immediately
 removes local eligibility without lifting any quarantine.
 
+[SENSO_LEARNING_LOOP.md](SENSO_LEARNING_LOOP.md) walks through this loop with a
+runnable offline example, the code and tests behind each step, and the measured
+results.
+
 Memory is opt-in. An enabled integrity or retrieval failure fails that assessment;
 there is no silent policy-only fallback. Empty valid retrieval is recorded as no
 precedent contribution. Policy sources and precedent citations remain separate.

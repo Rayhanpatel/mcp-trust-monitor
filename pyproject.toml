@@ -48,7 +48,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-exclude = ["/.venv*", "/.venv*/**", "/runtime/**", "/dist/**", "/.pytest_cache/**", "/.mypy_cache/**"]
+exclude = ["/.venv*", "/.venv*/**", "/runtime/**", "/dist/**", "/.pytest_cache/**", "/.mypy_cache/**", "/docs/media/**"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["mcp_trust_monitor"]
