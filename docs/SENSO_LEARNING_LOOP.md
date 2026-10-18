@@ -73,6 +73,24 @@ For readers who know Senso's
 
 ## 2. The loop at a glance
 
+<p align="center">
+  <a href="media/senso-learning-loop.mp4"><img src="media/senso-learning-loop.webp" width="800" alt="Animated overview: a changed tool is held for review; an operator records a policy violation, approves the exact lesson text and Senso stores it privately; a later similar change retrieves the lesson after scope and passage checks, and a changed passage is rejected"></a>
+</p>
+
+*25-second overview (**Illustrative**, silent loop).* [Watch the narrated version](media/senso-learning-loop.mp4).
+The screens are recreated from the console and the offline example in
+[section 3](#3-worked-example). They show no live Senso or model calls.
+
+<details>
+<summary>Narration</summary>
+
+1. When a tool changes, MCP Trust Monitor holds it until a person reviews it.
+2. You turn that judgement into a lesson, approve its exact text, and Senso stores it privately.
+3. When a similar change arrives, the lesson is retrieved and checked against what you approved.
+4. Lessons never approve tools. Memory is optional, and no accuracy gain is shown yet.
+
+</details>
+
 ```text
  ┌─────────────┐    ┌────────────┐    ┌───────────────────────────────┐
  │ tool change │───▶│ assessment │───▶│ human verdict on the change   │

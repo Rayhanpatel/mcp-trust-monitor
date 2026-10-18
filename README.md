@@ -107,6 +107,15 @@ changes they have already judged. Senso stores the approved lessons privately an
 searches them. MCP Trust Monitor decides which lessons count and re-checks
 everything Senso returns.
 
+<p align="center">
+  <a href="https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/media/senso-learning-loop.mp4"><img src="https://raw.githubusercontent.com/Rayhanpatel/mcp-trust-monitor/main/docs/media/senso-learning-loop.webp" width="800" alt="Animated overview: a changed tool is held for review; an operator records a policy violation, approves the exact lesson text and Senso stores it privately; a later similar change retrieves the lesson after scope and passage checks, and a changed passage is rejected"></a>
+</p>
+
+*25-second overview, silent loop.* [Watch the narrated version with sound](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/docs/media/senso-learning-loop.mp4).
+It is an animated recreation of the
+[offline example](https://github.com/Rayhanpatel/mcp-trust-monitor/blob/main/examples/learning_loop_offline.py),
+with stand-ins for Senso and the model.
+
 ```text
  ┌─────────────┐    ┌────────────┐    ┌───────────────────────────────┐
  │ tool change │───▶│ assessment │───▶│ human verdict on the change   │
