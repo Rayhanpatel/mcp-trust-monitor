@@ -20,7 +20,7 @@ the frozen paired evaluation, or the release acceptance requirements.
 
 Use `0c13bfc`, the public hackathon baseline. Its implementation is the approved M3 code at `67cd30c`; later commits corrected documentation. M1 enforcement, M2 detection/history and M3 assessment are implemented. The previous M4 monitoring and M5 interface were never built; their scope is superseded by L2 and L5 below. Historical tests and live measurements are in [HANDOFF.md](HANDOFF.md) and [EVIDENCE.md](EVIDENCE.md), not new validation of this release.
 
-The specification worktree is `/Users/rayhan/Desktop/Cyber-hack/mcp-trust-monitor-next`, branch `docs/library-release-spec`. Preserve the existing development worktrees, `hackathon-submission` tag and `mtm-record` recording copy. Use one implementation writer in this worktree after spec review; start a feature branch from the reviewed documentation commit. Do not resume the older M2 WIP branch.
+The specification worktree was a local `mcp-trust-monitor-next` checkout, branch `docs/library-release-spec`. Preserve the existing development worktrees, `hackathon-submission` tag and `mtm-record` recording copy. Use one implementation writer in this worktree after spec review; start a feature branch from the reviewed documentation commit. Do not resume the older M2 WIP branch.
 
 ## Milestones and review gates
 

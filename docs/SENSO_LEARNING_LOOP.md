@@ -73,13 +73,11 @@ For readers who know Senso's
 
 ## 2. The loop at a glance
 
-<p align="center">
-  <a href="media/senso-learning-loop.mp4"><img src="media/senso-learning-loop.webp" width="800" alt="Animated overview: a changed tool is held for review; an operator records a policy violation, approves the exact lesson text and Senso stores it privately; a later similar change retrieves the lesson after scope and passage checks, and a changed passage is rejected"></a>
-</p>
+https://github.com/user-attachments/assets/4e16d304-c373-4eed-8146-b0963c19cb01
 
-*25-second overview (**Illustrative**, silent loop).* [Watch the narrated version](media/senso-learning-loop.mp4).
-The screens are recreated from the console and the offline example in
-[section 3](#3-worked-example). They show no live Senso or model calls.
+*25-second narrated overview (**Illustrative**): press play, then unmute.* The screens
+are recreated from the console and the offline example in [section 3](#3-worked-example).
+They show no live Senso or model calls.
 
 <details>
 <summary>Narration</summary>

@@ -71,9 +71,6 @@ Known limits and follow-ups:
   observed again or closed.
 - The export does not yet carry a separate detector-binding digest.
 - Invalid description types are refused only after scoped policy retrieval.
-- After a superseded review attempt, the current context is rescheduled
-  immediately. The tests prove that it runs, but not that it runs before the next
-  poll.
 
 Current store schema is 4; export schema is 2. Older binaries that only support
 store schema 3 refuse upgraded stores. Back up a stopped state directory and use
